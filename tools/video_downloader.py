@@ -23,12 +23,23 @@ from tools.theme_utils import apply_shadow
 # ==========================================
 # 核心爬虫业务逻辑层 (严格对齐最新 fMP4+防广告 逻辑)
 # ==========================================
+class VideoDownloadError(RuntimeError):
+    """视频任务未能生成完整输出时抛出。"""
+
+
 class UniversalVideoSpider:
-    def __init__(self, output_dir="./downloads", temp_dir="./temp", log_callback=None, is_high_speed=False):
+    def __init__(self, output_dir="./downloads", temp_dir="./temp", log_callback=None,
+                 is_high_speed=False, segment_concurrency=None):
         self.output_dir = output_dir
         self.temp_dir = temp_dir
         self.log_callback = log_callback
         self.is_high_speed = is_high_speed
+        default_concurrency = 30 if is_high_speed else 5
+        self.segment_concurrency = (
+            default_concurrency if segment_concurrency is None else int(segment_concurrency)
+        )
+        if not 1 <= self.segment_concurrency <= 100:
+            raise ValueError("切片并发数必须在 1 到 100 之间")
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
@@ -48,14 +59,16 @@ class UniversalVideoSpider:
         if url.lower().endswith('.mp4') or '.mp4?' in url:
             self.log("[*] 判定为直链 MP4，启动普通下载模块...")
             save_path = os.path.join(self.output_dir, f"{output_filename}.mp4")
-            self._download_mp4(url, save_path)
+            return self._download_mp4(url, save_path)
 
         elif url.lower().endswith('.m3u8') or '.m3u8?' in url:
             self.log("[*] 判定为 M3U8 流，启动异步切片下载模块...")
             loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(self._download_m3u8(url, output_filename))
-            loop.close()
+            try:
+                asyncio.set_event_loop(loop)
+                return loop.run_until_complete(self._download_m3u8(url, output_filename))
+            finally:
+                loop.close()
 
         else:
             self.log("[*] 判定为网页，启动 Playwright 嗅探真实视频流 (请耐心等待浏览器后台加载)...")
@@ -65,9 +78,13 @@ class UniversalVideoSpider:
                 self.headers["Referer"] = url
                 parsed_url = urlparse(url)
                 self.headers["Origin"] = f"{parsed_url.scheme}://{parsed_url.netloc}"
-                self.run(real_url, output_filename)
-            else:
-                self.log("[-] 嗅探失败，未能找到视频流地址或受到严重混淆。")
+                return self.run(real_url, output_filename)
+            raise VideoDownloadError("嗅探失败，未能找到视频流")
+
+    def _verify_output(self, output_path):
+        if not os.path.isfile(output_path) or os.path.getsize(output_path) <= 0:
+            raise VideoDownloadError(f"输出文件不存在或为空: {output_path}")
+        return output_path
 
     # 【全新防广告机制】深度探测每个 M3U8 候选者的切片数量
     def _select_best_m3u8(self, m3u8_urls):
@@ -197,6 +214,7 @@ class UniversalVideoSpider:
                                 self.log(f"[>] MP4 下载进度: {percent}%")
                                 last_percent = percent
         self.log(f"[+] MP4 下载完成: {save_path}")
+        return self._verify_output(save_path)
 
     async def _download_ts(self, session, ts_url, save_path, cipher):
         retries = 3 if self.is_high_speed else 5
@@ -216,7 +234,7 @@ class UniversalVideoSpider:
                         content = decryptor.update(content) + decryptor.finalize()
                     with open(save_path, 'wb') as f:
                         f.write(content)
-                    return
+                    return True
             except Exception as e:
                 if attempt == retries - 1:
                     self.log(f"[!] 切片 {ts_url[-10:]} 彻底失败 (已重试{retries}次): {e}")
@@ -228,6 +246,21 @@ class UniversalVideoSpider:
                         if "503" in str(e) or "429" in str(e):
                             wait_time += 3
                         await asyncio.sleep(wait_time)
+        return False
+
+    async def _download_segments(self, session, download_items, cipher):
+        semaphore = asyncio.Semaphore(self.segment_concurrency)
+
+        async def bounded_download(ts_url, save_path):
+            async with semaphore:
+                return await self._download_ts(session, ts_url, save_path, cipher)
+
+        results = await asyncio.gather(*(
+            bounded_download(url, path) for url, path in download_items
+        ))
+        failed_count = results.count(False)
+        if failed_count:
+            raise VideoDownloadError(f"有 {failed_count} 个切片下载失败")
 
     async def _download_m3u8(self, m3u8_url: str, output_filename: str):
         playlist = m3u8.load(m3u8_url, headers=self.headers)
@@ -242,7 +275,9 @@ class UniversalVideoSpider:
         cipher = None
         if playlist.keys and playlist.keys[0]:
             key_url = playlist.keys[0].absolute_uri
-            key = requests.get(key_url, headers=self.headers).content
+            key_response = requests.get(key_url, headers=self.headers, timeout=15)
+            key_response.raise_for_status()
+            key = key_response.content
             iv = playlist.keys[0].iv
             iv = bytes.fromhex(iv[2:]) if iv else b'\x00' * 16
             cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
@@ -250,65 +285,61 @@ class UniversalVideoSpider:
 
         video_temp_dir = os.path.join(self.temp_dir, output_filename)
         os.makedirs(video_temp_dir, exist_ok=True)
-
         init_file_path = None
-        if playlist.segment_map:
-            self.log("[+] 检测到 fMP4 格式，正在下载 Init 初始化文件 (EXT-X-MAP)...")
-            init_url = playlist.segment_map[0].absolute_uri
-            init_file_path = os.path.join(video_temp_dir, "init.mp4")
-            try:
+        ts_files_list = []
+
+        try:
+            if playlist.segment_map:
+                self.log("[+] 检测到 fMP4 格式，正在下载 Init 初始化文件 (EXT-X-MAP)...")
+                init_url = playlist.segment_map[0].absolute_uri
+                init_file_path = os.path.join(video_temp_dir, "init.mp4")
                 res = requests.get(init_url, headers=self.headers, timeout=15)
                 res.raise_for_status()
                 with open(init_file_path, 'wb') as f:
                     f.write(res.content)
-            except Exception as e:
-                self.log(f"[-] Init 文件下载失败，合并可能会发生错误: {e}")
-                init_file_path = None
 
-        ts_files_list = []
-        self.log(f"[*] 共发现 {len(playlist.segments)} 个数据切片，准备下载...")
-
-        async with aiohttp.ClientSession(headers=self.headers, trust_env=True) as session:
-            tasks = []
+            self.log(f"[*] 共发现 {len(playlist.segments)} 个数据切片，准备下载...")
+            download_items = []
             for i, segment in enumerate(playlist.segments):
-                ts_url = segment.absolute_uri
-                ts_name = f"{i:05d}.ts"
-                save_path = os.path.join(video_temp_dir, ts_name)
+                save_path = os.path.join(video_temp_dir, f"{i:05d}.ts")
                 ts_files_list.append(save_path)
-                tasks.append(self._download_ts(session, ts_url, save_path, cipher))
+                download_items.append((segment.absolute_uri, save_path))
 
-            concurrent_limit = 30 if self.is_high_speed else 5
-            self.log(f"[*] 当前并发数限制设为: {concurrent_limit}")
-            sem = asyncio.Semaphore(concurrent_limit)
+            async with aiohttp.ClientSession(headers=self.headers, trust_env=True) as session:
+                self.log(f"[*] 当前并发数限制设为: {self.segment_concurrency}")
+                await self._download_segments(session, download_items, cipher)
 
-            async def bound_task(t):
-                async with sem:
-                    await t
-
-            await asyncio.gather(*(bound_task(t) for t in tasks))
-
-        self.log("[+] 切片处理完成，开始执行合并与转码...")
-        final_mp4_path = os.path.join(self.output_dir, f"{output_filename}.mp4")
-
-        self._merge_with_ffmpeg(ts_files_list, final_mp4_path, init_file_path)
-
-        for f in ts_files_list:
-            if os.path.exists(f):
-                os.remove(f)
-        if init_file_path and os.path.exists(init_file_path):
-            os.remove(init_file_path)
-        os.rmdir(video_temp_dir)
-        self.log("[+] 临时文件已清理，任务彻底完成！")
+            self.log("[+] 切片处理完成，开始执行合并与转码...")
+            final_mp4_path = os.path.join(self.output_dir, f"{output_filename}.mp4")
+            self._merge_with_ffmpeg(ts_files_list, final_mp4_path, init_file_path)
+            self.log("[+] 任务彻底完成！")
+            return self._verify_output(final_mp4_path)
+        except VideoDownloadError:
+            raise
+        except Exception as e:
+            raise VideoDownloadError(f"M3U8 下载失败: {e}") from e
+        finally:
+            try:
+                for file_path in ts_files_list:
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                if init_file_path and os.path.exists(init_file_path):
+                    os.remove(init_file_path)
+                if os.path.isdir(video_temp_dir):
+                    os.rmdir(video_temp_dir)
+                self.log("[+] 临时文件已清理。")
+            except Exception as cleanup_error:
+                self.log(f"[!] 临时文件清理失败: {cleanup_error}")
 
     def _merge_with_ffmpeg(self, ts_files: list, output_mp4: str, init_file: str = None):
         valid_ts_files = [ts for ts in ts_files if os.path.exists(ts)]
 
         if not valid_ts_files:
-            self.log("[-] 没有任何有效的切片被下载，合并任务中止！")
-            return
+            raise VideoDownloadError("没有任何有效切片，合并任务中止")
 
         if len(valid_ts_files) < len(ts_files):
-            self.log(f"[!] 警告: 有 {len(ts_files) - len(valid_ts_files)} 个切片缺失。仍将强行合并。")
+            missing_count = len(ts_files) - len(valid_ts_files)
+            raise VideoDownloadError(f"有 {missing_count} 个切片缺失，合并任务中止")
 
         if init_file and os.path.exists(init_file):
             self.log("[*] 正在执行 fMP4 底层二进制重组，请稍候...")
@@ -332,13 +363,16 @@ class UniversalVideoSpider:
 
                 self.log(f"[+] fMP4 视频成功产出并保存至:\n {output_mp4}")
             except subprocess.CalledProcessError as e:
-                self.log(f"[-] FFmpeg 修复容器失败！错误:\n{e.stderr.decode('utf-8', errors='ignore')}")
+                error = e.stderr.decode('utf-8', errors='ignore') if e.stderr else str(e)
+                raise VideoDownloadError(f"FFmpeg 修复容器失败: {error}") from e
             except Exception as e:
-                self.log(f"[-] 文件读写异常: {e}")
+                if isinstance(e, VideoDownloadError):
+                    raise
+                raise VideoDownloadError(f"fMP4 合并失败: {e}") from e
             finally:
                 if os.path.exists(raw_mp4):
                     os.remove(raw_mp4)
-            return
+            return self._verify_output(output_mp4)
 
         list_file_path = os.path.join(self.temp_dir, "concat_list.txt")
         with open(list_file_path, 'w', encoding='utf-8') as f:
@@ -359,10 +393,16 @@ class UniversalVideoSpider:
             subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, startupinfo=startupinfo)
             self.log(f"[+] 视频成功产出并保存至:\n {output_mp4}")
         except subprocess.CalledProcessError as e:
-            self.log(f"[-] FFmpeg 合并失败！请检查系统环境。错误:\n{e.stderr.decode('utf-8', errors='ignore')}")
+            error = e.stderr.decode('utf-8', errors='ignore') if e.stderr else str(e)
+            raise VideoDownloadError(f"FFmpeg 合并失败: {error}") from e
+        except Exception as e:
+            if isinstance(e, VideoDownloadError):
+                raise
+            raise VideoDownloadError(f"视频合并失败: {e}") from e
         finally:
             if os.path.exists(list_file_path):
                 os.remove(list_file_path)
+        return self._verify_output(output_mp4)
 
 
 # ==========================================
