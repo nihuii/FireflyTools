@@ -6,7 +6,13 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from tools.video_downloader import UniversalVideoSpider, VideoDownloadError
+from PyQt6.QtWidgets import QApplication
+
+from tools.video_downloader import (
+    UniversalVideoSpider,
+    VideoDownloadError,
+    VideoDownloaderTool,
+)
 
 TEST_TEMP_ROOT = os.path.join(os.path.dirname(__file__), ".tmp")
 os.makedirs(TEST_TEMP_ROOT, exist_ok=True)
@@ -82,6 +88,42 @@ class UniversalVideoSpiderTests(unittest.TestCase):
 
             with self.assertRaisesRegex(VideoDownloadError, "输出文件"):
                 spider._verify_output(output_path)
+
+
+class VideoDownloaderToolTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.tool = VideoDownloaderTool(start_worker=False)
+
+    def tearDown(self):
+        self.tool.close()
+
+    def test_mode_switch_restores_default_concurrency(self):
+        self.assertEqual(self.tool.concurrency_spin.value(), 5)
+
+        self.tool.toggle_mode()
+        self.assertEqual(self.tool.concurrency_spin.value(), 30)
+
+        self.tool.concurrency_spin.setValue(12)
+        self.tool.toggle_mode()
+        self.assertEqual(self.tool.concurrency_spin.value(), 5)
+
+    def test_added_task_snapshots_custom_concurrency(self):
+        self.tool.url_entry.setText("https://example.invalid/video.m3u8")
+        self.tool.name_entry.setText("example")
+        self.tool.path_entry.setText("downloads")
+        self.tool.concurrency_spin.setValue(12)
+
+        self.tool.add_to_queue()
+        task = self.tool.task_queue.get_nowait()
+
+        self.assertEqual(task["segment_concurrency"], 12)
+        self.assertFalse(task["is_high_speed"])
+        self.assertIn("12并发", self.tool.queue_listbox.item(0).text())
+        self.tool.task_queue.task_done()
 
 
 if __name__ == "__main__":

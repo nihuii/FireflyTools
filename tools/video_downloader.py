@@ -10,7 +10,8 @@ import random
 from urllib.parse import urlparse
 
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-                             QLineEdit, QPushButton, QListWidget, QTextEdit, QFileDialog, QMessageBox, QFrame)
+                             QLineEdit, QPushButton, QListWidget, QTextEdit, QFileDialog,
+                             QMessageBox, QFrame, QSpinBox)
 from PyQt6.QtCore import pyqtSignal, Qt
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -412,8 +413,9 @@ class VideoDownloaderTool(QWidget):
     log_signal = pyqtSignal(str)
     queue_pop_signal = pyqtSignal()
 
-    def __init__(self):
+    def __init__(self, start_worker=True, spider_factory=UniversalVideoSpider):
         super().__init__()
+        self.spider_factory = spider_factory
         self.task_queue = queue.Queue()
         self.is_high_speed_mode = False  # 默认使用低速稳定模式
 
@@ -451,6 +453,17 @@ class VideoDownloaderTool(QWidget):
         row3.addWidget(btn_browse)
         layout.addLayout(row3)
 
+        row4 = QHBoxLayout()
+        row4.addWidget(QLabel("切片并发数:"))
+        self.concurrency_spin = QSpinBox()
+        self.concurrency_spin.setRange(1, 100)
+        self.concurrency_spin.setValue(5)
+        self.concurrency_spin.setSuffix(" 个")
+        self.concurrency_spin.setFixedWidth(120)
+        row4.addWidget(self.concurrency_spin)
+        row4.addStretch()
+        layout.addLayout(row4)
+
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
 
@@ -480,7 +493,8 @@ class VideoDownloaderTool(QWidget):
 
         self.log_signal.emit("欢迎使用视频爬虫工具！等待添加任务...\n")
 
-        threading.Thread(target=self.queue_worker, daemon=True).start()
+        if start_worker:
+            threading.Thread(target=self.queue_worker, daemon=True).start()
 
     def select_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "选择保存位置")
@@ -498,9 +512,11 @@ class VideoDownloaderTool(QWidget):
     def toggle_mode(self):
         self.is_high_speed_mode = not self.is_high_speed_mode
         if self.is_high_speed_mode:
+            self.concurrency_spin.setValue(30)
             self.mode_btn.setText("⚡ 当前: 高速爆发模式")
             self.log_signal.emit("[!] 已切换至【高速爆发模式】: 速度极快，但容易遇到 503 报错导致丢切片。")
         else:
+            self.concurrency_spin.setValue(5)
             self.mode_btn.setText("🛡️ 当前: 低速稳定模式")
             self.log_signal.emit("[*] 已切换至【低速稳定模式】: 带防封禁和退避重试，保证视频完整性。")
 
@@ -514,14 +530,20 @@ class VideoDownloaderTool(QWidget):
             "url": url,
             "name": name,
             "save_dir": save_dir,
-            "is_high_speed": self.is_high_speed_mode
+            "is_high_speed": self.is_high_speed_mode,
+            "segment_concurrency": self.concurrency_spin.value()
         }
         self.task_queue.put(task)
 
         mode_label = "高速" if self.is_high_speed_mode else "稳定"
-        display_text = f"[{mode_label}] {name} -> {url[:40]}..."
+        display_text = (
+            f"[{mode_label} / {task['segment_concurrency']}并发] "
+            f"{name} -> {url[:40]}..."
+        )
         self.queue_listbox.addItem(display_text)
-        self.log_signal.emit(f"[+] 已添加队列 ({mode_label}模式): {name}")
+        self.log_signal.emit(
+            f"[+] 已添加队列 ({mode_label}模式 / {task['segment_concurrency']}并发): {name}"
+        )
         self.url_entry.clear()
 
     def queue_worker(self):
