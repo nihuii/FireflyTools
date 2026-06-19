@@ -1,5 +1,6 @@
 import asyncio
 import os
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -98,6 +99,31 @@ class UniversalVideoSpiderTests(unittest.TestCase):
 
             with self.assertRaisesRegex(VideoDownloadError, "输出文件"):
                 spider._verify_output(output_path)
+
+    def test_cleanup_error_does_not_hide_ffmpeg_failure(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TEMP_ROOT) as temp_dir:
+            segment_path = os.path.join(temp_dir, "00000.ts")
+            with open(segment_path, "wb") as segment_file:
+                segment_file.write(b"segment")
+            spider = UniversalVideoSpider(output_dir=temp_dir, temp_dir=temp_dir)
+            ffmpeg_error = subprocess.CalledProcessError(
+                1,
+                ["ffmpeg"],
+                stderr=b"merge failed",
+            )
+
+            with patch(
+                "tools.video_downloader.subprocess.run",
+                side_effect=ffmpeg_error,
+            ), patch(
+                "tools.video_downloader.os.remove",
+                side_effect=PermissionError("cleanup denied"),
+            ):
+                with self.assertRaisesRegex(VideoDownloadError, "FFmpeg 合并失败"):
+                    spider._merge_with_ffmpeg(
+                        [segment_path],
+                        os.path.join(temp_dir, "output.mp4"),
+                    )
 
 
 class VideoDownloaderToolTests(unittest.TestCase):

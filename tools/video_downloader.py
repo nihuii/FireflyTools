@@ -87,6 +87,13 @@ class UniversalVideoSpider:
             raise VideoDownloadError(f"输出文件不存在或为空: {output_path}")
         return output_path
 
+    def _remove_temp_file(self, file_path):
+        try:
+            if file_path and os.path.exists(file_path):
+                os.remove(file_path)
+        except Exception as cleanup_error:
+            self.log(f"[!] 临时文件清理失败 ({file_path}): {cleanup_error}")
+
     # 【全新防广告机制】深度探测每个 M3U8 候选者的切片数量
     def _select_best_m3u8(self, m3u8_urls):
         unique_urls = []
@@ -320,12 +327,10 @@ class UniversalVideoSpider:
         except Exception as e:
             raise VideoDownloadError(f"M3U8 下载失败: {e}") from e
         finally:
+            for file_path in ts_files_list:
+                self._remove_temp_file(file_path)
+            self._remove_temp_file(init_file_path)
             try:
-                for file_path in ts_files_list:
-                    if os.path.exists(file_path):
-                        os.remove(file_path)
-                if init_file_path and os.path.exists(init_file_path):
-                    os.remove(init_file_path)
                 if os.path.isdir(video_temp_dir):
                     os.rmdir(video_temp_dir)
                 self.log("[+] 临时文件已清理。")
@@ -371,8 +376,7 @@ class UniversalVideoSpider:
                     raise
                 raise VideoDownloadError(f"fMP4 合并失败: {e}") from e
             finally:
-                if os.path.exists(raw_mp4):
-                    os.remove(raw_mp4)
+                self._remove_temp_file(raw_mp4)
             return self._verify_output(output_mp4)
 
         list_file_path = os.path.join(self.temp_dir, "concat_list.txt")
@@ -401,8 +405,7 @@ class UniversalVideoSpider:
                 raise
             raise VideoDownloadError(f"视频合并失败: {e}") from e
         finally:
-            if os.path.exists(list_file_path):
-                os.remove(list_file_path)
+            self._remove_temp_file(list_file_path)
         return self._verify_output(output_mp4)
 
 
