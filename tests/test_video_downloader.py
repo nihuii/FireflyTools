@@ -39,6 +39,16 @@ class FailingSegmentSpider(UniversalVideoSpider):
         return ts_url != "bad"
 
 
+class RecordingSpider:
+    init_kwargs = None
+
+    def __init__(self, **kwargs):
+        type(self).init_kwargs = kwargs
+
+    def run(self, url, name):
+        return os.path.join("downloads", f"{name}.mp4")
+
+
 class UniversalVideoSpiderTests(unittest.TestCase):
     def test_segment_downloads_obey_selected_concurrency(self):
         with tempfile.TemporaryDirectory(dir=TEST_TEMP_ROOT) as temp_dir:
@@ -124,6 +134,106 @@ class VideoDownloaderToolTests(unittest.TestCase):
         self.assertFalse(task["is_high_speed"])
         self.assertIn("12并发", self.tool.queue_listbox.item(0).text())
         self.tool.task_queue.task_done()
+
+    def test_worker_passes_task_concurrency_to_spider(self):
+        tool = VideoDownloaderTool(
+            start_worker=False,
+            spider_factory=RecordingSpider,
+        )
+        task = {
+            "url": "https://example.invalid/video.m3u8",
+            "name": "example",
+            "save_dir": "downloads",
+            "is_high_speed": True,
+            "segment_concurrency": 17,
+        }
+
+        result = tool._execute_task(task)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(RecordingSpider.init_kwargs["segment_concurrency"], 17)
+        tool.close()
+
+    def test_batch_emits_once_after_all_tasks_finish(self):
+        self.tool.batch_finished_signal.disconnect(self.tool.show_batch_results)
+        batches = []
+        self.tool.batch_finished_signal.connect(batches.append)
+        first = {"name": "one"}
+        second = {"name": "two"}
+        self.tool.task_queue.put(first)
+        self.tool.task_queue.put(second)
+
+        self.tool.task_queue.get_nowait()
+        self.tool._finish_task({
+            "task": first,
+            "success": True,
+            "output_path": "one.mp4",
+            "error": "",
+        })
+        self.assertEqual(batches, [])
+
+        self.tool.task_queue.get_nowait()
+        self.tool._finish_task({
+            "task": second,
+            "success": False,
+            "output_path": "",
+            "error": "failed",
+        })
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(
+            [item["task"]["name"] for item in batches[0]],
+            ["one", "two"],
+        )
+
+    def test_retry_requeues_only_failed_tasks_with_original_configuration(self):
+        failed_task = {
+            "url": "https://example.invalid/fail.m3u8",
+            "name": "failed",
+            "save_dir": "downloads",
+            "is_high_speed": True,
+            "segment_concurrency": 17,
+        }
+        results = [
+            {
+                "task": {"name": "ok"},
+                "success": True,
+                "output_path": "ok.mp4",
+                "error": "",
+            },
+            {
+                "task": failed_task,
+                "success": False,
+                "output_path": "",
+                "error": "network",
+            },
+        ]
+
+        self.tool.retry_failed_tasks(results)
+        retried = self.tool.task_queue.get_nowait()
+
+        self.assertEqual(retried, failed_task)
+        self.assertTrue(self.tool.task_queue.empty())
+        self.tool.task_queue.task_done()
+
+    def test_batch_summary_contains_success_and_failure_details(self):
+        summary, details = self.tool.format_batch_results([
+            {
+                "task": {"name": "ok"},
+                "success": True,
+                "output_path": "ok.mp4",
+                "error": "",
+            },
+            {
+                "task": {"name": "bad"},
+                "success": False,
+                "output_path": "",
+                "error": "merge failed",
+            },
+        ])
+
+        self.assertIn("成功 1 个，失败 1 个", summary)
+        self.assertIn("ok", details)
+        self.assertIn("bad: merge failed", details)
 
 
 if __name__ == "__main__":

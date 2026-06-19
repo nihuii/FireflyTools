@@ -412,11 +412,13 @@ class UniversalVideoSpider:
 class VideoDownloaderTool(QWidget):
     log_signal = pyqtSignal(str)
     queue_pop_signal = pyqtSignal()
+    batch_finished_signal = pyqtSignal(object)
 
     def __init__(self, start_worker=True, spider_factory=UniversalVideoSpider):
         super().__init__()
         self.spider_factory = spider_factory
         self.task_queue = queue.Queue()
+        self._batch_results = []
         self.is_high_speed_mode = False  # 默认使用低速稳定模式
 
         main_layout = QVBoxLayout(self)
@@ -490,6 +492,7 @@ class VideoDownloaderTool(QWidget):
 
         self.log_signal.connect(self.append_log)
         self.queue_pop_signal.connect(self.pop_queue_ui)
+        self.batch_finished_signal.connect(self.show_batch_results)
 
         self.log_signal.emit("欢迎使用视频爬虫工具！等待添加任务...\n")
 
@@ -533,41 +536,115 @@ class VideoDownloaderTool(QWidget):
             "is_high_speed": self.is_high_speed_mode,
             "segment_concurrency": self.concurrency_spin.value()
         }
-        self.task_queue.put(task)
+        self._enqueue_task(task)
+        self.url_entry.clear()
 
-        mode_label = "高速" if self.is_high_speed_mode else "稳定"
+    def _enqueue_task(self, task):
+        queued_task = dict(task)
+        self.task_queue.put(queued_task)
+        mode_label = "高速" if queued_task["is_high_speed"] else "稳定"
+        concurrency = queued_task["segment_concurrency"]
         display_text = (
-            f"[{mode_label} / {task['segment_concurrency']}并发] "
-            f"{name} -> {url[:40]}..."
+            f"[{mode_label} / {concurrency}并发] "
+            f"{queued_task['name']} -> {queued_task['url'][:40]}..."
         )
         self.queue_listbox.addItem(display_text)
         self.log_signal.emit(
-            f"[+] 已添加队列 ({mode_label}模式 / {task['segment_concurrency']}并发): {name}"
+            f"[+] 已添加队列 ({mode_label}模式 / {concurrency}并发): "
+            f"{queued_task['name']}"
         )
-        self.url_entry.clear()
+
+    def _execute_task(self, task):
+        try:
+            spider = self.spider_factory(
+                output_dir=task["save_dir"],
+                temp_dir="./temp",
+                log_callback=self.log_signal.emit,
+                is_high_speed=task["is_high_speed"],
+                segment_concurrency=task["segment_concurrency"],
+            )
+            output_path = spider.run(task["url"], task["name"])
+            return {
+                "task": task,
+                "success": True,
+                "output_path": output_path,
+                "error": "",
+            }
+        except Exception as e:
+            self.log_signal.emit(f"\n[X] 错误: {e}")
+            return {
+                "task": task,
+                "success": False,
+                "output_path": "",
+                "error": str(e),
+            }
+
+    def _finish_task(self, result):
+        self._batch_results.append(result)
+        self.task_queue.task_done()
+        if self.task_queue.unfinished_tasks == 0:
+            completed_batch = list(self._batch_results)
+            self._batch_results.clear()
+            self.batch_finished_signal.emit(completed_batch)
+
+    def retry_failed_tasks(self, results):
+        for result in results:
+            if not result["success"]:
+                self._enqueue_task(result["task"])
+
+    @staticmethod
+    def format_batch_results(results):
+        succeeded = [result for result in results if result["success"]]
+        failed = [result for result in results if not result["success"]]
+        summary = f"队列处理完成：成功 {len(succeeded)} 个，失败 {len(failed)} 个。"
+
+        detail_lines = []
+        if succeeded:
+            detail_lines.append("成功任务：")
+            detail_lines.extend(
+                f"  ✓ {result['task']['name']}" for result in succeeded
+            )
+        if failed:
+            if detail_lines:
+                detail_lines.append("")
+            detail_lines.append("失败任务：")
+            detail_lines.extend(
+                f"  ✗ {result['task']['name']}: {result['error']}"
+                for result in failed
+            )
+        return summary, "\n".join(detail_lines)
+
+    def show_batch_results(self, results):
+        summary, details = self.format_batch_results(results)
+        failed = [result for result in results if not result["success"]]
+
+        message_box = QMessageBox(self)
+        message_box.setWindowTitle("下载队列处理完成")
+        message_box.setText(summary)
+        message_box.setInformativeText(details)
+        message_box.setIcon(
+            QMessageBox.Icon.Warning if failed else QMessageBox.Icon.Information
+        )
+
+        retry_button = None
+        if failed:
+            retry_button = message_box.addButton(
+                "重试全部失败任务", QMessageBox.ButtonRole.AcceptRole
+            )
+        message_box.addButton(QMessageBox.StandardButton.Close)
+        message_box.exec()
+        if retry_button is not None and message_box.clickedButton() is retry_button:
+            self.retry_failed_tasks(results)
 
     def queue_worker(self):
         while True:
             task = self.task_queue.get()
             self.queue_pop_signal.emit()
 
-            url = task['url']
-            name = task['name']
-            save_dir = task['save_dir']
-            is_high_speed = task.get('is_high_speed', False)
-
             self.log_signal.emit("\n" + "=" * 50)
-            self.log_signal.emit(f"▶ 开始执行: {name}")
-            try:
-                spider = UniversalVideoSpider(
-                    output_dir=save_dir,
-                    temp_dir="./temp",
-                    log_callback=self.log_signal.emit,
-                    is_high_speed=is_high_speed
-                )
-                spider.run(url, name)
-            except Exception as e:
-                self.log_signal.emit(f"\n[X] 错误: {e}")
-            finally:
-                self.log_signal.emit(f"⏹ 任务 {name} 结束。等待下一个任务...\n")
-                self.task_queue.task_done()
+            self.log_signal.emit(f"▶ 开始执行: {task['name']}")
+            result = self._execute_task(task)
+            self.log_signal.emit(
+                f"⏹ 任务 {task['name']} 结束。等待下一个任务...\n"
+            )
+            self._finish_task(result)
