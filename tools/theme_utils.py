@@ -103,7 +103,7 @@ def get_global_stylesheet(image_path):
             border: 1px solid {border_color};
         }}
         QLabel, QCheckBox, QRadioButton {{ color: {text_color}; font-weight: bold; font-size: 13px; background: transparent; }}
-        QLineEdit, QTextEdit, QListWidget {{
+        QLineEdit, QSpinBox, QTextEdit, QListWidget {{
             background-color: {input_bg};
             border: 1px solid {border_color};
             border-radius: 8px;
