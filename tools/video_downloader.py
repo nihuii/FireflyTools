@@ -94,6 +94,20 @@ class UniversalVideoSpider:
         except Exception as cleanup_error:
             self.log(f"[!] 临时文件清理失败 ({file_path}): {cleanup_error}")
 
+    def _validate_segment_failures(self, failed_count, total_count):
+        if failed_count <= 0:
+            return
+        if total_count <= 0 or failed_count * 100 > total_count * 3:
+            raise VideoDownloadError(
+                f"有 {failed_count} 个切片下载失败（总计 {total_count} 个），"
+                f"超过允许的 3%"
+            )
+        failed_percent = failed_count * 100 / total_count
+        self.log(
+            f"[!] 警告: 有 {failed_count}/{total_count} 个切片失败 "
+            f"({failed_percent:.2f}%)，未超过 3%，将继续合并。"
+        )
+
     # 【全新防广告机制】深度探测每个 M3U8 候选者的切片数量
     def _select_best_m3u8(self, m3u8_urls):
         unique_urls = []
@@ -267,8 +281,7 @@ class UniversalVideoSpider:
             bounded_download(url, path) for url, path in download_items
         ))
         failed_count = results.count(False)
-        if failed_count:
-            raise VideoDownloadError(f"有 {failed_count} 个切片下载失败")
+        self._validate_segment_failures(failed_count, len(results))
 
     async def _download_m3u8(self, m3u8_url: str, output_filename: str):
         playlist = m3u8.load(m3u8_url, headers=self.headers)
@@ -345,7 +358,7 @@ class UniversalVideoSpider:
 
         if len(valid_ts_files) < len(ts_files):
             missing_count = len(ts_files) - len(valid_ts_files)
-            raise VideoDownloadError(f"有 {missing_count} 个切片缺失，合并任务中止")
+            self._validate_segment_failures(missing_count, len(ts_files))
 
         if init_file and os.path.exists(init_file):
             self.log("[*] 正在执行 fMP4 底层二进制重组，请稍候...")

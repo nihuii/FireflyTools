@@ -40,6 +40,21 @@ class FailingSegmentSpider(UniversalVideoSpider):
         return ts_url != "bad"
 
 
+class RatioFailingSegmentSpider(UniversalVideoSpider):
+    async def _download_ts(self, session, ts_url, save_path, cipher):
+        return not ts_url.startswith("bad")
+
+
+def segment_items(failed_count, total_count):
+    return [
+        (
+            f"bad-{index}" if index < failed_count else f"good-{index}",
+            f"{index}.ts",
+        )
+        for index in range(total_count)
+    ]
+
+
 class RecordingSpider:
     init_kwargs = None
 
@@ -83,6 +98,53 @@ class UniversalVideoSpiderTests(unittest.TestCase):
                         None,
                     )
                 )
+
+    def test_three_percent_failed_segments_are_tolerated(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TEMP_ROOT) as temp_dir:
+            spider = RatioFailingSegmentSpider(
+                output_dir=temp_dir,
+                temp_dir=temp_dir,
+            )
+
+            asyncio.run(
+                spider._download_segments(None, segment_items(3, 100), None)
+            )
+
+    def test_more_than_three_percent_failed_segments_fail(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TEMP_ROOT) as temp_dir:
+            spider = RatioFailingSegmentSpider(
+                output_dir=temp_dir,
+                temp_dir=temp_dir,
+            )
+
+            with self.assertRaisesRegex(VideoDownloadError, "超过允许的 3%"):
+                asyncio.run(
+                    spider._download_segments(None, segment_items(4, 100), None)
+                )
+
+    def test_merge_accepts_three_percent_missing_segments(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TEMP_ROOT) as temp_dir:
+            segment_paths = []
+            for index in range(100):
+                path = os.path.join(temp_dir, f"{index:05d}.ts")
+                segment_paths.append(path)
+                if index >= 3:
+                    with open(path, "wb") as segment_file:
+                        segment_file.write(b"segment")
+            output_path = os.path.join(temp_dir, "output.mp4")
+
+            def fake_ffmpeg(command, **kwargs):
+                with open(output_path, "wb") as output_file:
+                    output_file.write(b"video")
+
+            spider = UniversalVideoSpider(output_dir=temp_dir, temp_dir=temp_dir)
+            with patch(
+                "tools.video_downloader.subprocess.run",
+                side_effect=fake_ffmpeg,
+            ):
+                result = spider._merge_with_ffmpeg(segment_paths, output_path)
+
+            self.assertEqual(result, output_path)
 
     def test_missing_sniffed_stream_is_failure(self):
         with tempfile.TemporaryDirectory(dir=TEST_TEMP_ROOT) as temp_dir:
