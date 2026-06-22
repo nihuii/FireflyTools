@@ -17,6 +17,7 @@ def get_global_stylesheet(image_path):
     """提取图片主色调，并生成覆盖全局的透明磨砂 QSS"""
     # 默认色彩
     panel_bg = "rgba(30, 30, 30, 0.45)"
+    dialog_bg = "#252525"
     text_color = "#ffffff"
     btn_bg = "rgba(100, 181, 246, 0.85)"
     btn_hover = "rgba(66, 165, 245, 0.95)"
@@ -47,6 +48,7 @@ def get_global_stylesheet(image_path):
             # 动态明暗主题自适应
             if luminance > 135:
                 panel_bg = "rgba(255, 255, 255, 0.45)"
+                dialog_bg = "#f5f5f5"
                 text_color = "#1c2833"
                 input_bg = "rgba(255, 255, 255, 0.65)"
                 border_color = "rgba(255, 255, 255, 0.5)"
@@ -56,6 +58,7 @@ def get_global_stylesheet(image_path):
                 nav_sel_text = "#d84315"
             else:
                 panel_bg = "rgba(20, 20, 20, 0.55)"
+                dialog_bg = "#252525"
                 text_color = "#fdfefe"
                 input_bg = "rgba(0, 0, 0, 0.45)"
                 border_color = "rgba(255, 255, 255, 0.15)"
@@ -101,6 +104,13 @@ def get_global_stylesheet(image_path):
             background-color: {panel_bg};
             border-radius: 12px;
             border: 1px solid {border_color};
+        }}
+        QMessageBox {{
+            background-color: {dialog_bg};
+        }}
+        QMessageBox QLabel {{
+            color: {text_color};
+            background: transparent;
         }}
         QLabel, QCheckBox, QRadioButton {{ color: {text_color}; font-weight: bold; font-size: 13px; background: transparent; }}
         QLineEdit, QSpinBox, QTextEdit, QListWidget {{
