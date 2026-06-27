@@ -1,14 +1,17 @@
 ﻿import asyncio
 import os
+import requests
 import subprocess
 import tempfile
 import unittest
 from types import SimpleNamespace
+from urllib.error import URLError
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QScrollArea
+from PyQt6.QtCore import Qt
 
 from tools.video_downloader import (
     UniversalVideoSpider,
@@ -176,6 +179,14 @@ def fake_playlist(segment_count, byteranges=None):
     )
 
 
+class FakeResponse:
+    def __init__(self, text):
+        self.text = text
+
+    def raise_for_status(self):
+        return None
+
+
 class UniversalVideoSpiderTests(unittest.TestCase):
     def test_segment_downloads_obey_selected_concurrency(self):
         with tempfile.TemporaryDirectory(dir=TEST_TEMP_ROOT) as temp_dir:
@@ -298,6 +309,23 @@ class UniversalVideoSpiderTests(unittest.TestCase):
                     spider.run("https://example.invalid/watch", "video")
         self.assertEqual(raised.exception.code, VideoErrorCode.NO_MEDIA_FOUND)
 
+    def test_webpage_forbidden_report_uses_http_forbidden_code(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TEMP_ROOT) as temp_dir:
+            spider = UniversalVideoSpider(output_dir=temp_dir, temp_dir=temp_dir)
+            with patch.object(
+                spider,
+                "_sniff_real_url",
+                side_effect=VideoDownloadError(
+                    VideoErrorCode.HTTP_FORBIDDEN,
+                    "页面访问受限",
+                    retryable=False,
+                ),
+            ):
+                with self.assertRaises(VideoDownloadError) as raised:
+                    spider.run("https://example.test/watch", "video")
+
+        self.assertEqual(raised.exception.code, VideoErrorCode.HTTP_FORBIDDEN)
+
     def test_sniff_real_url_uses_page_sniffer_report_mp4_candidate(self):
         with tempfile.TemporaryDirectory(dir=TEST_TEMP_ROOT) as temp_dir:
             spider = UniversalVideoSpider(output_dir=temp_dir, temp_dir=temp_dir)
@@ -362,6 +390,97 @@ class UniversalVideoSpiderTests(unittest.TestCase):
             self.assertEqual(captured_headers["Origin"], "https://example.test")
             self.assertEqual(captured_headers["Authorization"], "Bearer secret")
             self.assertEqual(captured_headers["Cookie"], "sid=abc")
+
+    def test_sniff_real_url_rejects_unverified_hls_candidate(self):
+        spider = UniversalVideoSpider(output_dir="downloads", temp_dir="temp")
+        report = DiagnosticReport(
+            source_url="https://example.test/watch",
+            candidates=[
+                MediaCandidate(
+                    url="https://cdn.example.test/index.m3u8",
+                    kind=MediaKind.HLS,
+                    source="response-body",
+                    score=75,
+                )
+            ],
+        )
+
+        with patch("tools.video_crawler.spider.PageSniffer") as sniffer_class:
+            sniffer_class.return_value.sniff.return_value = report
+            with patch(
+                "tools.video_crawler.spider.requests.get",
+                side_effect=requests.exceptions.Timeout("timed out"),
+            ):
+                with self.assertRaises(VideoDownloadError) as raised:
+                    spider._sniff_real_url("https://example.test/watch")
+
+        self.assertEqual(raised.exception.code, VideoErrorCode.NETWORK_TIMEOUT)
+        self.assertTrue(raised.exception.retryable)
+        self.assertIn("候选 M3U8", str(raised.exception))
+
+    def test_select_best_m3u8_prefers_higher_bandwidth_when_segments_tie(self):
+        messages = []
+        spider = UniversalVideoSpider(
+            output_dir="downloads",
+            temp_dir="temp",
+            log_callback=messages.append,
+        )
+        low_master = "https://cdn.example.test/low/index.m3u8"
+        high_master = "https://cdn.example.test/high/index.m3u8"
+        responses = {
+            low_master: FakeResponse(
+                "#EXTM3U\n"
+                "#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720\n"
+                "https://cdn.example.test/low/720.m3u8\n"
+            ),
+            "https://cdn.example.test/low/720.m3u8": FakeResponse(
+                "#EXTM3U\n#EXT-X-TARGETDURATION:8\n"
+                "#EXTINF:8,\n000.ts\n#EXTINF:8,\n001.ts\n"
+                "#EXTINF:8,\n002.ts\n#EXT-X-ENDLIST\n"
+            ),
+            high_master: FakeResponse(
+                "#EXTM3U\n"
+                "#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1920x1080\n"
+                "https://cdn.example.test/high/1080.m3u8\n"
+            ),
+            "https://cdn.example.test/high/1080.m3u8": FakeResponse(
+                "#EXTM3U\n#EXT-X-TARGETDURATION:8\n"
+                "#EXTINF:8,\n000.ts\n#EXTINF:8,\n001.ts\n"
+                "#EXTINF:8,\n002.ts\n#EXT-X-ENDLIST\n"
+            ),
+        }
+
+        with patch(
+            "tools.video_crawler.spider.requests.get",
+            side_effect=lambda url, **kwargs: responses[url],
+        ):
+            best_url, segment_count = spider._select_best_m3u8(
+                [low_master, high_master]
+            )
+
+        self.assertEqual(best_url, high_master)
+        self.assertEqual(segment_count, 3)
+        log_text = "\n".join(messages)
+        self.assertIn("最高码率 3000k", log_text)
+        self.assertIn("分辨率 1920x1080", log_text)
+
+    def test_m3u8_load_timeout_uses_network_timeout_code(self):
+        spider = UniversalVideoSpider(output_dir="downloads", temp_dir="temp")
+
+        with patch(
+            "tools.video_crawler.adapters.hls.m3u8.load",
+            side_effect=URLError(TimeoutError("timed out")),
+        ):
+            with self.assertRaises(VideoDownloadError) as raised:
+                asyncio.run(
+                    spider._download_m3u8(
+                        "https://cdn.example.test/index.m3u8",
+                        "video",
+                    )
+                )
+
+        self.assertEqual(raised.exception.code, VideoErrorCode.NETWORK_TIMEOUT)
+        self.assertTrue(raised.exception.retryable)
 
     def test_empty_output_is_failure(self):
         with tempfile.TemporaryDirectory(dir=TEST_TEMP_ROOT) as temp_dir:
@@ -534,10 +653,73 @@ class VideoDownloaderToolTests(unittest.TestCase):
     def test_diagnose_button_is_available(self):
         self.assertEqual(self.tool.diagnose_btn.text(), "诊断链接")
 
+    def test_settings_area_is_scrollable_and_split_into_rows(self):
+        self.assertIsInstance(self.tool.scroll_area, QScrollArea)
+        self.assertTrue(self.tool.scroll_area.widgetResizable())
+        self.assertEqual(
+            self.tool.scroll_area.verticalScrollBarPolicy(),
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded,
+        )
+        self.assertNotEqual(
+            self.tool.container.minimumWidth(),
+            self.tool.container.maximumWidth(),
+        )
+
+        self.assertGreaterEqual(
+            self.tool.download_options_layout.indexOf(self.tool.concurrency_spin),
+            0,
+        )
+        self.assertEqual(
+            self.tool.download_options_layout.indexOf(self.tool.visible_sniff_chk),
+            -1,
+        )
+        self.assertGreaterEqual(
+            self.tool.sniff_options_layout.indexOf(self.tool.visible_sniff_chk),
+            0,
+        )
+        self.assertGreaterEqual(
+            self.tool.sniff_options_layout.indexOf(self.tool.sniff_wait_spin),
+            0,
+        )
+
+    def test_scroll_area_background_remains_transparent(self):
+        self.assertTrue(
+            self.tool.scroll_area.testAttribute(
+                Qt.WidgetAttribute.WA_TranslucentBackground
+            )
+        )
+        self.assertTrue(
+            self.tool.scroll_area.viewport().testAttribute(
+                Qt.WidgetAttribute.WA_TranslucentBackground
+            )
+        )
+        self.assertTrue(
+            self.tool.scroll_content.testAttribute(
+                Qt.WidgetAttribute.WA_TranslucentBackground
+            )
+        )
+        self.assertIn("background: transparent", self.tool.scroll_area.styleSheet())
+
     def test_diagnose_task_logs_static_report(self):
         self.tool._diagnose_task("https://cdn.example.invalid/video.mp4")
 
         self.assertIn("DIRECT_MP4", self.tool.log_text.toPlainText())
+
+    def test_diagnose_task_uses_ui_sniffer_options(self):
+        self.tool.visible_sniff_chk.setChecked(True)
+        self.tool.persistent_profile_chk.setChecked(True)
+        self.tool.sniff_wait_spin.setValue(22)
+
+        with patch("tools.video_downloader.PageSniffer") as sniffer_class:
+            sniffer_class.return_value.sniff.return_value = DiagnosticReport(
+                source_url="https://example.test/watch"
+            )
+            self.tool._diagnose_task("https://example.test/watch")
+
+        options = sniffer_class.call_args.kwargs["options"]
+        self.assertFalse(options.headless)
+        self.assertTrue(options.use_persistent_profile)
+        self.assertEqual(options.manual_wait_seconds, 22)
 
     def test_append_log_redacts_sensitive_text(self):
         self.tool.append_log(
@@ -602,6 +784,22 @@ class VideoDownloaderToolTests(unittest.TestCase):
         self.assertEqual(task["live_record_seconds"], 45)
         self.tool.task_queue.task_done()
 
+    def test_added_task_snapshots_sniffer_options(self):
+        self.tool.url_entry.setText("https://example.invalid/watch")
+        self.tool.name_entry.setText("example")
+        self.tool.path_entry.setText("downloads")
+        self.tool.visible_sniff_chk.setChecked(True)
+        self.tool.persistent_profile_chk.setChecked(True)
+        self.tool.sniff_wait_spin.setValue(25)
+
+        self.tool.add_to_queue()
+        task = self.tool.task_queue.get_nowait()
+
+        self.assertFalse(task["sniffer_headless"])
+        self.assertTrue(task["sniffer_use_persistent_profile"])
+        self.assertEqual(task["sniffer_manual_wait_seconds"], 25)
+        self.tool.task_queue.task_done()
+
     def test_worker_passes_task_concurrency_to_spider(self):
         tool = VideoDownloaderTool(
             start_worker=False,
@@ -615,6 +813,9 @@ class VideoDownloaderToolTests(unittest.TestCase):
             "segment_concurrency": 17,
             "resume_enabled": False,
             "live_record_seconds": 123,
+            "sniffer_headless": False,
+            "sniffer_use_persistent_profile": True,
+            "sniffer_manual_wait_seconds": 33,
         }
 
         result = tool._execute_task(task)
@@ -623,6 +824,10 @@ class VideoDownloaderToolTests(unittest.TestCase):
         self.assertEqual(RecordingSpider.init_kwargs["segment_concurrency"], 17)
         self.assertFalse(RecordingSpider.init_kwargs["resume_enabled"])
         self.assertEqual(RecordingSpider.init_kwargs["live_record_seconds"], 123)
+        options = RecordingSpider.init_kwargs["sniffer_options"]
+        self.assertFalse(options.headless)
+        self.assertTrue(options.use_persistent_profile)
+        self.assertEqual(options.manual_wait_seconds, 33)
         tool.close()
 
     def test_execute_task_returns_structured_video_error(self):
@@ -670,6 +875,24 @@ class VideoDownloaderToolTests(unittest.TestCase):
         self.assertEqual(result["error"], "unexpected boom")
         self.assertEqual(result["error_code"], VideoErrorCode.UNKNOWN.value)
         self.assertFalse(result["retryable"])
+
+    def test_batch_summary_suggests_network_checks_for_timeout(self):
+        summary, details = VideoDownloaderTool.format_batch_results(
+            [
+                {
+                    "task": {"name": "video", "url": "https://example.test/watch"},
+                    "success": False,
+                    "error": "读取 M3U8 超时",
+                    "error_code": VideoErrorCode.NETWORK_TIMEOUT.value,
+                    "retryable": True,
+                }
+            ]
+        )
+
+        self.assertIn("失败 1 个", summary)
+        self.assertIn("NETWORK_TIMEOUT", details)
+        self.assertIn("网络超时", details)
+        self.assertIn("可视化嗅探", details)
 
     def test_ytdlp_fallback_runs_for_no_media_when_enabled(self):
         tool = VideoDownloaderTool(
@@ -897,6 +1120,23 @@ class VideoDownloaderToolTests(unittest.TestCase):
         self.assertIn("HTTP_FORBIDDEN", details)
         self.assertIn("服务器拒绝访问", details)
         self.assertIn("不建议直接重试", details)
+
+    def test_batch_summary_suggests_visible_sniffing_for_http_forbidden(self):
+        summary, details = self.tool.format_batch_results([
+            {
+                "task": {"name": "blocked"},
+                "success": False,
+                "output_path": "",
+                "error": "页面访问受限",
+                "error_code": VideoErrorCode.HTTP_FORBIDDEN.value,
+                "retryable": False,
+            }
+        ])
+
+        self.assertIn("失败 1 个", summary)
+        self.assertIn("HTTP_FORBIDDEN", details)
+        self.assertIn("可视化嗅探", details)
+        self.assertIn("复用浏览器会话", details)
 
     def test_batch_summary_contains_success_and_failure_details(self):
         summary, details = self.tool.format_batch_results([

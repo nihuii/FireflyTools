@@ -35,6 +35,27 @@ class BrowserSessionSnapshot:
 
 
 @dataclass(frozen=True)
+class PageAccessSnapshot:
+    status_code: int | None = None
+    title: str = ""
+    final_url: str = ""
+    video_count: int = 0
+    iframe_count: int = 0
+
+
+@dataclass(frozen=True)
+class SnifferOptions:
+    headless: bool = True
+    use_persistent_profile: bool = False
+    profile_dir: str = "./browser_profiles/video_crawler"
+    manual_wait_seconds: int = 10
+
+    @property
+    def visible(self) -> bool:
+        return not self.headless
+
+
+@dataclass(frozen=True)
 class DiagnosticReport:
     source_url: str
     candidates: list[MediaCandidate] = field(default_factory=list)

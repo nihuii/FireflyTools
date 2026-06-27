@@ -4,13 +4,15 @@ import queue
 
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QLineEdit, QPushButton, QListWidget, QTextEdit, QFileDialog,
-                             QMessageBox, QFrame, QSpinBox, QCheckBox)
+                             QMessageBox, QFrame, QSpinBox, QCheckBox, QScrollArea,
+                             QSizePolicy)
 from PyQt6.QtCore import pyqtSignal, Qt
 
 from tools.theme_utils import apply_shadow
 from tools.video_crawler.adapters.ytdlp import YtDlpAdapter
 from tools.video_crawler.errors import VideoDownloadError, VideoErrorCode
 from tools.video_crawler.logging_utils import redact_for_display
+from tools.video_crawler.models import SnifferOptions
 from tools.video_crawler.sniffer import PageSniffer
 from tools.video_crawler.spider import UniversalVideoSpider
 
@@ -31,17 +33,53 @@ class VideoDownloaderTool(QWidget):
         self.is_high_speed_mode = False  # 默认使用低速稳定模式
 
         main_layout = QVBoxLayout(self)
-        main_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setObjectName("videoDownloaderScrollArea")
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll_area.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.scroll_area.setAutoFillBackground(False)
+        self.scroll_area.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.scroll_area.viewport().setAttribute(
+            Qt.WidgetAttribute.WA_TranslucentBackground
+        )
+        self.scroll_area.viewport().setAutoFillBackground(False)
+        self.scroll_area.setStyleSheet(
+            "#videoDownloaderScrollArea, "
+            "#videoDownloaderScrollArea > QWidget, "
+            "#videoDownloaderScrollContent { "
+            "background: transparent; border: 0px; }"
+        )
+
+        self.scroll_content = QWidget()
+        self.scroll_content.setObjectName("videoDownloaderScrollContent")
+        self.scroll_content.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.scroll_content.setAutoFillBackground(False)
+        self.scroll_area.setWidget(self.scroll_content)
+        main_layout.addWidget(self.scroll_area)
+
+        scroll_layout = QVBoxLayout(self.scroll_content)
+        scroll_layout.setContentsMargins(18, 18, 18, 18)
+        scroll_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         self.container = QFrame()
         self.container.setObjectName("container")
-        self.container.setFixedWidth(650)
+        self.container.setMinimumWidth(650)
+        self.container.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
         apply_shadow(self.container)
 
         layout = QVBoxLayout(self.container)
         layout.setContentsMargins(25, 25, 25, 25)
         layout.setSpacing(15)
-        main_layout.addWidget(self.container)
+        scroll_layout.addWidget(self.container)
 
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("目标网址:"))
@@ -64,28 +102,53 @@ class VideoDownloaderTool(QWidget):
         row3.addWidget(btn_browse)
         layout.addLayout(row3)
 
-        row4 = QHBoxLayout()
-        row4.addWidget(QLabel("切片并发数:"))
+        options_layout = QVBoxLayout()
+        options_layout.setSpacing(8)
+
+        self.download_options_layout = QHBoxLayout()
+        self.download_options_layout.setSpacing(12)
+        self.download_options_layout.addWidget(QLabel("下载参数:"))
+        self.download_options_layout.addWidget(QLabel("切片并发:"))
         self.concurrency_spin = QSpinBox()
         self.concurrency_spin.setRange(1, 100)
         self.concurrency_spin.setValue(5)
         self.concurrency_spin.setSuffix(" 个")
         self.concurrency_spin.setFixedWidth(120)
-        row4.addWidget(self.concurrency_spin)
+        self.download_options_layout.addWidget(self.concurrency_spin)
         self.resume_chk = QCheckBox("复用未完成切片")
         self.resume_chk.setChecked(True)
-        row4.addWidget(self.resume_chk)
+        self.download_options_layout.addWidget(self.resume_chk)
         self.ytdlp_chk = QCheckBox("公开平台失败时尝试 yt-dlp")
         self.ytdlp_chk.setChecked(False)
-        row4.addWidget(self.ytdlp_chk)
+        self.download_options_layout.addWidget(self.ytdlp_chk)
         self.live_seconds_spin = QSpinBox()
         self.live_seconds_spin.setRange(30, 7200)
         self.live_seconds_spin.setValue(300)
         self.live_seconds_spin.setSuffix(" 秒直播录制")
         self.live_seconds_spin.setFixedWidth(150)
-        row4.addWidget(self.live_seconds_spin)
-        row4.addStretch()
-        layout.addLayout(row4)
+        self.download_options_layout.addWidget(self.live_seconds_spin)
+        self.download_options_layout.addStretch()
+        options_layout.addLayout(self.download_options_layout)
+
+        self.sniff_options_layout = QHBoxLayout()
+        self.sniff_options_layout.setSpacing(12)
+        self.sniff_options_layout.addWidget(QLabel("嗅探选项:"))
+        self.visible_sniff_chk = QCheckBox("可视化嗅探")
+        self.visible_sniff_chk.setChecked(False)
+        self.sniff_options_layout.addWidget(self.visible_sniff_chk)
+        self.persistent_profile_chk = QCheckBox("复用浏览器会话")
+        self.persistent_profile_chk.setChecked(False)
+        self.sniff_options_layout.addWidget(self.persistent_profile_chk)
+        self.sniff_options_layout.addWidget(QLabel("等待:"))
+        self.sniff_wait_spin = QSpinBox()
+        self.sniff_wait_spin.setRange(5, 180)
+        self.sniff_wait_spin.setValue(10)
+        self.sniff_wait_spin.setSuffix(" 秒等待")
+        self.sniff_wait_spin.setFixedWidth(120)
+        self.sniff_options_layout.addWidget(self.sniff_wait_spin)
+        self.sniff_options_layout.addStretch()
+        options_layout.addLayout(self.sniff_options_layout)
+        layout.addLayout(options_layout)
 
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
@@ -160,8 +223,19 @@ class VideoDownloaderTool(QWidget):
             from tools.video_crawler.diagnostics import VideoDiagnosticService
             from tools.video_crawler.reporting import format_diagnostic_report
 
+            sniffer_options = self._build_sniffer_options()
+            if not sniffer_options.headless:
+                self.log_signal.emit("[*] 诊断将打开可视化浏览器窗口。")
+            if sniffer_options.use_persistent_profile:
+                self.log_signal.emit(
+                    "[*] 诊断将复用 browser_profiles/video_crawler 会话。"
+                )
             service = VideoDiagnosticService(
-                sniffer=PageSniffer(headers={}, log_callback=self.log_signal.emit)
+                sniffer=PageSniffer(
+                    headers={},
+                    log_callback=self.log_signal.emit,
+                    options=sniffer_options,
+                )
             )
             report = service.analyze(url)
             self.log_signal.emit("\n" + format_diagnostic_report(report))
@@ -183,6 +257,9 @@ class VideoDownloaderTool(QWidget):
             "resume_enabled": self.resume_chk.isChecked(),
             "use_ytdlp_fallback": self.ytdlp_chk.isChecked(),
             "live_record_seconds": self.live_seconds_spin.value(),
+            "sniffer_headless": not self.visible_sniff_chk.isChecked(),
+            "sniffer_use_persistent_profile": self.persistent_profile_chk.isChecked(),
+            "sniffer_manual_wait_seconds": self.sniff_wait_spin.value(),
         }
         self._enqueue_task(task)
         self.url_entry.clear()
@@ -202,8 +279,23 @@ class VideoDownloaderTool(QWidget):
             f"{queued_task['name']}"
         )
 
+    def _build_sniffer_options(self):
+        return SnifferOptions(
+            headless=not self.visible_sniff_chk.isChecked(),
+            use_persistent_profile=self.persistent_profile_chk.isChecked(),
+            manual_wait_seconds=self.sniff_wait_spin.value(),
+        )
+
     def _execute_task(self, task):
         try:
+            sniffer_options = SnifferOptions(
+                headless=task.get("sniffer_headless", True),
+                use_persistent_profile=task.get(
+                    "sniffer_use_persistent_profile",
+                    False,
+                ),
+                manual_wait_seconds=task.get("sniffer_manual_wait_seconds", 10),
+            )
             spider = self.spider_factory(
                 output_dir=task["save_dir"],
                 temp_dir="./temp",
@@ -212,6 +304,7 @@ class VideoDownloaderTool(QWidget):
                 segment_concurrency=task["segment_concurrency"],
                 resume_enabled=task.get("resume_enabled", True),
                 live_record_seconds=task.get("live_record_seconds", 300),
+                sniffer_options=sniffer_options,
             )
             output_path = spider.run(task["url"], task["name"])
             return {
@@ -332,6 +425,18 @@ class VideoDownloaderTool(QWidget):
                 f"  {code}: {count} 个"
                 for code, count in sorted(error_counts.items())
             )
+            if error_counts.get(VideoErrorCode.HTTP_FORBIDDEN.value):
+                detail_lines.append(
+                    "  建议: 页面访问受限。请确认普通浏览器可播放；"
+                    "若可播放，尝试启用“可视化嗅探”和“复用浏览器会话”，"
+                    "在弹出的浏览器中完成允许的人工操作后再点击播放。"
+                )
+            if error_counts.get(VideoErrorCode.NETWORK_TIMEOUT.value):
+                detail_lines.append(
+                    "  建议: 网络超时。请确认候选 M3U8 在普通浏览器可访问；"
+                    "若网页可播放，尝试启用“可视化嗅探”和“复用浏览器会话”，"
+                    "延长等待时间后再点击播放，也可稍后重试或检查网络。"
+                )
             if not VideoDownloaderTool.has_retryable_failures(results):
                 detail_lines.append(
                     "  建议: 这些失败不建议直接重试，请先检查链接、权限或资源类型。"

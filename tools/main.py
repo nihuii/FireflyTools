@@ -1,7 +1,7 @@
 import sys
 import os
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QTabWidget, QVBoxLayout,
-                             QHBoxLayout, QWidget, QLabel, QPushButton)
+                             QHBoxLayout, QWidget, QLabel, QPushButton, QSizeGrip)
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QPainter, QPixmap, QPainterPath, QColor
 
@@ -133,6 +133,11 @@ class MediaToolboxApp(QMainWindow):
         self.notebook = QTabWidget()
         self.layout.addWidget(self.notebook)
 
+        self.size_grip = QSizeGrip(self.main_wrapper)
+        self.size_grip.setObjectName("windowSizeGrip")
+        self.size_grip.raise_()
+        self._position_size_grip()
+
         self.notebook.addTab(VideoDownloaderTool(), "视频下载爬虫")
         self.notebook.addTab(VideoExtractorTool(), "视频子目录提取")
         self.notebook.addTab(KeywordOrganizerTool(), "关键字归档")
@@ -168,6 +173,20 @@ class MediaToolboxApp(QMainWindow):
             # 全局下发带智能色彩提取的 QSS 样式表
             self.setStyleSheet(get_global_stylesheet(img_path))
             self.main_wrapper.update()  # 强制刷新背景绘制
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_size_grip()
+
+    def _position_size_grip(self):
+        if hasattr(self, "size_grip"):
+            grip_size = self.size_grip.sizeHint()
+            self.size_grip.setGeometry(
+                self.main_wrapper.width() - grip_size.width() - 4,
+                self.main_wrapper.height() - grip_size.height() - 4,
+                grip_size.width(),
+                grip_size.height(),
+            )
 
 
 if __name__ == "__main__":

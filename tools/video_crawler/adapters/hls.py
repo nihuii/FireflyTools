@@ -5,6 +5,7 @@ import random
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
+from urllib.error import URLError
 
 import aiohttp
 import m3u8
@@ -15,6 +16,16 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from tools.video_crawler.errors import VideoDownloadError, VideoErrorCode
 from tools.video_crawler.models import DiagnosticReport, MediaCandidate, MediaKind
 from tools.video_crawler.resume import SegmentManifest
+
+
+def is_timeout_like_error(exc: Exception) -> bool:
+    if isinstance(exc, (TimeoutError, requests.exceptions.Timeout)):
+        return True
+    reason = getattr(exc, "reason", None)
+    if isinstance(reason, TimeoutError):
+        return True
+    text = str(exc).lower()
+    return "timed out" in text or "timeout" in text or "10060" in text
 
 
 @dataclass(frozen=True)
@@ -193,6 +204,26 @@ class HlsAdapter:
             )
         return output_path
 
+    def _load_playlist(self, playlist_url: str):
+        try:
+            return m3u8.load(playlist_url, headers=self.headers)
+        except Exception as exc:
+            if is_timeout_like_error(exc):
+                raise VideoDownloadError(
+                    VideoErrorCode.NETWORK_TIMEOUT,
+                    f"读取 M3U8 超时或网络不可达: {playlist_url}",
+                    details={"url": playlist_url, "reason": str(exc)},
+                    retryable=True,
+                ) from exc
+            if isinstance(exc, URLError):
+                raise VideoDownloadError(
+                    VideoErrorCode.M3U8_PARSE_FAILED,
+                    f"读取 M3U8 失败: {playlist_url}",
+                    details={"url": playlist_url, "reason": str(exc)},
+                    retryable=False,
+                ) from exc
+            raise
+
     def _remove_temp_file(self, file_path):
         try:
             if file_path and os.path.exists(file_path):
@@ -330,7 +361,7 @@ class HlsAdapter:
         )
 
     async def download_url(self, m3u8_url: str, output_filename: str):
-        playlist = m3u8.load(m3u8_url, headers=self.headers)
+        playlist = self._load_playlist(m3u8_url)
         if playlist.is_variant:
             rendition_plan = build_hls_rendition_plan(playlist)
             playlists = list(playlist.playlists)
@@ -437,7 +468,7 @@ class HlsAdapter:
         return self._verify_output(output_path)
 
     def download_subtitle_playlist(self, subtitle_url: str, output_filename: str) -> str:
-        playlist = m3u8.load(subtitle_url, headers=self.headers)
+        playlist = self._load_playlist(subtitle_url)
         output_path = os.path.join(self.temp_dir, f"{output_filename}.vtt")
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, "w", encoding="utf-8") as output:
@@ -461,7 +492,7 @@ class HlsAdapter:
         seen_urls = set()
         captured_items = []
         while loop.time() < deadline:
-            playlist = m3u8.load(m3u8_url, headers=self.headers)
+            playlist = self._load_playlist(m3u8_url)
             media_sequence = getattr(playlist, "media_sequence", 0) or 0
             for index, segment in enumerate(playlist.segments):
                 if segment.absolute_uri in seen_urls:
@@ -542,7 +573,7 @@ class HlsAdapter:
                 self.log(f"[!] 临时文件清理失败: {cleanup_error}")
 
     async def _download_playlist_to_mp4(self, m3u8_url: str, output_filename: str):
-        playlist = m3u8.load(m3u8_url, headers=self.headers)
+        playlist = self._load_playlist(m3u8_url)
 
         if is_live_playlist(playlist):
             return await self.download_live_playlist(m3u8_url, output_filename)
@@ -557,7 +588,7 @@ class HlsAdapter:
             )
             m3u8_url = playlists[0].absolute_uri
             self.log("[*] 检测到多画质变体，已自动选择最高画质流...")
-            playlist = m3u8.load(m3u8_url, headers=self.headers)
+            playlist = self._load_playlist(m3u8_url)
 
         video_temp_dir = os.path.join(self.temp_dir, output_filename)
         os.makedirs(video_temp_dir, exist_ok=True)

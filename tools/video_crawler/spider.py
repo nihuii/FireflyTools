@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 
 import m3u8
@@ -11,9 +12,87 @@ from tools.video_crawler.adapters.direct_mp4 import DirectMp4Adapter
 from tools.video_crawler.adapters.hls import HlsAdapter
 from tools.video_crawler.errors import VideoDownloadError, VideoErrorCode
 from tools.video_crawler.logging_utils import redact_for_display
-from tools.video_crawler.models import MediaCandidate, MediaKind
+from tools.video_crawler.models import MediaCandidate, MediaKind, SnifferOptions
 from tools.video_crawler.session import build_download_headers
 from tools.video_crawler.sniffer import PageSniffer
+
+
+URL_BANDWIDTH_PATTERN = re.compile(r"(?<!\d)(\d{3,5})k(?!\d)", re.IGNORECASE)
+
+
+def is_timeout_like_error(exc: Exception) -> bool:
+    if isinstance(
+        exc,
+        (
+            TimeoutError,
+            requests.exceptions.Timeout,
+            requests.exceptions.ConnectionError,
+        ),
+    ):
+        return True
+    text = str(exc).lower()
+    return "timed out" in text or "timeout" in text or "10060" in text
+
+
+def _resolution_tuple(value) -> tuple[int, int]:
+    if isinstance(value, (tuple, list)) and len(value) == 2:
+        try:
+            return int(value[0] or 0), int(value[1] or 0)
+        except (TypeError, ValueError):
+            return 0, 0
+    if isinstance(value, str) and "x" in value.lower():
+        left, _, right = value.lower().partition("x")
+        try:
+            return int(left or 0), int(right or 0)
+        except ValueError:
+            return 0, 0
+    return 0, 0
+
+
+def _resolution_pixels(resolution: tuple[int, int]) -> int:
+    return int(resolution[0] or 0) * int(resolution[1] or 0)
+
+
+def _infer_bandwidth_from_url(url: str) -> int:
+    match = URL_BANDWIDTH_PATTERN.search(url or "")
+    if not match:
+        return 0
+    return int(match.group(1)) * 1000
+
+
+def _best_variant_info(playlist) -> dict:
+    best_info = {
+        "url": "",
+        "bandwidth": 0,
+        "resolution": (0, 0),
+    }
+    for item in getattr(playlist, "playlists", []) or []:
+        stream_info = getattr(item, "stream_info", None)
+        bandwidth = int(getattr(stream_info, "bandwidth", 0) or 0)
+        resolution = _resolution_tuple(getattr(stream_info, "resolution", None))
+        current_key = (bandwidth, _resolution_pixels(resolution))
+        best_key = (
+            best_info["bandwidth"],
+            _resolution_pixels(best_info["resolution"]),
+        )
+        if current_key > best_key:
+            best_info = {
+                "url": getattr(item, "absolute_uri", "") or getattr(item, "uri", ""),
+                "bandwidth": bandwidth,
+                "resolution": resolution,
+            }
+    return best_info
+
+
+def _format_quality_metrics(bandwidth: int, resolution: tuple[int, int]) -> str:
+    parts = []
+    if bandwidth:
+        parts.append(f"最高码率 {round(bandwidth / 1000)}k")
+    if _resolution_pixels(resolution):
+        parts.append(f"分辨率 {resolution[0]}x{resolution[1]}")
+    if not parts:
+        parts.append("码率/分辨率未知")
+    return " | ".join(parts)
 
 
 class UniversalVideoSpider:
@@ -27,6 +106,7 @@ class UniversalVideoSpider:
         session_snapshot=None,
         resume_enabled=True,
         live_record_seconds=300,
+        sniffer_options: SnifferOptions | None = None,
     ):
         self.output_dir = output_dir
         self.temp_dir = temp_dir
@@ -35,6 +115,7 @@ class UniversalVideoSpider:
         self.session_snapshot = session_snapshot
         self.resume_enabled = resume_enabled
         self.live_record_seconds = int(live_record_seconds)
+        self.sniffer_options = sniffer_options or SnifferOptions()
         default_concurrency = 30 if is_high_speed else 5
         self.segment_concurrency = (
             default_concurrency
@@ -191,8 +272,8 @@ class UniversalVideoSpider:
             if url not in unique_urls:
                 unique_urls.append(url)
 
-        best_url = None
-        max_segments = -1
+        probe_results = []
+        self._last_m3u8_probe_errors = []
         self.log(f"[*] 开始对 {len(unique_urls)} 个候选流进行切片数量探测...")
 
         for url in unique_urls:
@@ -200,15 +281,28 @@ class UniversalVideoSpider:
                 response = requests.get(url, headers=self.headers, timeout=5)
                 response.raise_for_status()
                 if "#EXTM3U" not in response.text:
+                    self._last_m3u8_probe_errors.append(
+                        {
+                            "url": url,
+                            "reason": "响应不是有效 M3U8 playlist",
+                            "timeout": False,
+                        }
+                    )
                     continue
                 playlist = m3u8.loads(response.text, uri=url)
+                bandwidth = _infer_bandwidth_from_url(url)
+                resolution = (0, 0)
                 if playlist.is_variant:
-                    child_url = playlist.playlists[0].absolute_uri
+                    variant_info = _best_variant_info(playlist)
+                    bandwidth = variant_info["bandwidth"] or bandwidth
+                    resolution = variant_info["resolution"]
+                    child_url = variant_info["url"]
                     child_response = requests.get(
                         child_url,
                         headers=self.headers,
                         timeout=5,
                     )
+                    child_response.raise_for_status()
                     child_playlist = m3u8.loads(
                         child_response.text,
                         uri=child_url,
@@ -217,20 +311,57 @@ class UniversalVideoSpider:
                 else:
                     segment_count = len(playlist.segments)
 
+                probe_result = {
+                    "url": url,
+                    "segment_count": segment_count,
+                    "bandwidth": bandwidth,
+                    "resolution": resolution,
+                    "is_variant": bool(playlist.is_variant),
+                }
+                probe_results.append(probe_result)
                 self.log(
                     f"  -> 探测完成 | 切片数 {segment_count:4d} | "
+                    f"{_format_quality_metrics(bandwidth, resolution)} | "
                     f"链接: {url[:60]}..."
                 )
-                if segment_count > max_segments:
-                    max_segments = segment_count
-                    best_url = url
-            except Exception:
+            except Exception as exc:
+                self._last_m3u8_probe_errors.append(
+                    {
+                        "url": url,
+                        "reason": str(exc),
+                        "timeout": is_timeout_like_error(exc),
+                    }
+                )
                 continue
 
-        return best_url, max_segments
+        self._last_m3u8_probe_results = probe_results
+        if not probe_results:
+            return None, -1
+
+        max_segments = max(item["segment_count"] for item in probe_results)
+        segment_tolerance = max(3, int(max_segments * 0.05))
+        comparable_results = [
+            item
+            for item in probe_results
+            if max_segments - item["segment_count"] <= segment_tolerance
+        ]
+        best_result = max(
+            comparable_results,
+            key=lambda item: (
+                item["bandwidth"],
+                _resolution_pixels(item["resolution"]),
+                item["segment_count"],
+            ),
+        )
+        self._last_selected_m3u8_probe = best_result
+        return best_result["url"], best_result["segment_count"]
 
     def _sniff_real_url(self, page_url: str) -> str | None:
-        report = PageSniffer(headers=self.headers, log_callback=self.log).sniff(page_url)
+        report = PageSniffer(
+            headers=self.headers,
+            log_callback=self.log,
+            options=self.sniffer_options,
+        ).sniff(page_url)
         self.session_snapshot = report.session
         hls_urls = [
             candidate.url
@@ -240,20 +371,41 @@ class UniversalVideoSpider:
         if hls_urls:
             best_url, segment_count = self._select_best_m3u8(hls_urls)
             if best_url:
+                selected_probe = getattr(self, "_last_selected_m3u8_probe", {})
+                quality_text = _format_quality_metrics(
+                    int(selected_probe.get("bandwidth", 0) or 0),
+                    selected_probe.get("resolution", (0, 0)),
+                )
                 if segment_count < 10:
                     self.log(
                         f"[!] 警告: 选出的 M3U8 切片数较少 "
-                        f"({segment_count} 个)，可能是短视频或广告。"
+                        f"({segment_count} 个，{quality_text})，"
+                        "可能是短视频或广告。"
                     )
                 else:
                     self.log(
                         f"[+] 决策结果: 成功锁定正片流，"
-                        f"切片数 {segment_count}。"
+                        f"切片数 {segment_count}，{quality_text}。"
                     )
                 return best_url
-            final_url = hls_urls[-1]
-            self.log("[+] 决策结果: 深度探测未果，降级使用最后捕获的 M3U8。")
-            return final_url
+            probe_errors = getattr(self, "_last_m3u8_probe_errors", [])
+            timeout_like = any(error.get("timeout") for error in probe_errors)
+            code = (
+                VideoErrorCode.NETWORK_TIMEOUT
+                if timeout_like
+                else VideoErrorCode.M3U8_PARSE_FAILED
+            )
+            message = (
+                "候选 M3U8 无法在下载器中验证，"
+                "可能网络超时、站点拒绝直连或 playlist 无效。"
+            )
+            self.log(f"[X] {message}")
+            raise VideoDownloadError(
+                code,
+                message,
+                details={"candidate_urls": hls_urls, "probe_errors": probe_errors},
+                retryable=timeout_like,
+            )
 
         for candidate in report.candidates:
             if candidate.kind == MediaKind.DIRECT_MP4:

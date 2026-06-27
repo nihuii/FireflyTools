@@ -3,7 +3,11 @@ import unittest
 from tools.video_crawler.diagnostics import VideoDiagnosticService
 from tools.video_crawler.models import MediaKind
 from tools.video_crawler.reporting import format_diagnostic_report
-from tools.video_crawler.sniffer import classify_media_response, merge_media_request_headers
+from tools.video_crawler.sniffer import (
+    classify_media_response,
+    extract_media_urls_from_text,
+    merge_media_request_headers,
+)
 
 
 class VideoDiagnosticServiceTests(unittest.TestCase):
@@ -119,6 +123,46 @@ class PageSnifferSessionCaptureTests(unittest.TestCase):
         self.assertEqual(result["Authorization"], "Bearer fresh")
         self.assertEqual(result["X-Token"], "edge")
         self.assertNotIn("Cookie", result)
+
+
+class MediaUrlExtractionTests(unittest.TestCase):
+    def test_extracts_absolute_media_urls_from_json_text(self):
+        text = '{"url":"https://cdn.example.test/path/master.m3u8?token=abc"}'
+
+        urls = extract_media_urls_from_text("https://site.example/watch", text)
+
+        self.assertEqual(
+            urls,
+            ["https://cdn.example.test/path/master.m3u8?token=abc"],
+        )
+
+    def test_extracts_relative_media_urls(self):
+        text = 'window.source = "/video/stream.m3u8?ep=16";'
+
+        urls = extract_media_urls_from_text("https://site.example/watch/page", text)
+
+        self.assertEqual(urls, ["https://site.example/video/stream.m3u8?ep=16"])
+
+    def test_deduplicates_urls_preserving_order(self):
+        text = "https://cdn/a.m3u8 https://cdn/a.m3u8 https://cdn/b.mp4"
+
+        urls = extract_media_urls_from_text("https://site.example", text)
+
+        self.assertEqual(urls, ["https://cdn/a.m3u8", "https://cdn/b.mp4"])
+
+    def test_ignores_escaped_regex_media_patterns(self):
+        text = (
+            r'const matcher = /\\.m3u8(?:\\?|$)/;'
+            r'const fake = "https://www.aowu.tv/\\.m3u8";'
+            r'const real = "https:\/\/cdn.example.test\/video\/master.m3u8?token=abc";'
+        )
+
+        urls = extract_media_urls_from_text("https://www.aowu.tv/watch", text)
+
+        self.assertEqual(
+            urls,
+            ["https://cdn.example.test/video/master.m3u8?token=abc"],
+        )
 
 
 if __name__ == "__main__":
