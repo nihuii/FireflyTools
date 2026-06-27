@@ -15,8 +15,7 @@ FireflyTools/
 |- LICENSE
 |- README.md
 |- requirements.txt
-|- pic/
-|  `- 流萤-140834037.png
+|- pic/                       # All bundled UI wallpapers
 |- tools/
 |  |- ffmpeg.exe
 |  |- *.py
@@ -35,14 +34,14 @@ Keep in Git:
 - All Python source files under `tools/`.
 - All tests under `tests/`, excluding generated caches and temporary data.
 - `tools/ffmpeg.exe`.
-- One default wallpaper, `pic/流萤-140834037.png`.
+- All bundled wallpapers under `pic/`; they are part of the application's visual
+  experience and must remain available after a fresh checkout.
 - README, dependency metadata, license, project overview, plans, and design docs.
 
 Stop tracking but preserve locally where useful:
 
 - `.idea/`.
 - Python bytecode and `__pycache__/` directories.
-- Additional personal wallpapers under `pic/`.
 - Browser profiles, virtual environments, downloads, temporary segments, and
   test temporary directories.
 
