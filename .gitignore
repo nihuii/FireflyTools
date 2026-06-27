@@ -1,2 +1,38 @@
+# Python bytecode and tooling
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments and local environment files
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# IDE and agent-local state
+.idea/
+.vscode/
+.agents/
 .worktrees/
 
+# Runtime output and resumable download state
+downloads/
+temp/
+browser_profiles/
+*.part
+*.tmp
+.firefly-segments.json*
+
+# Test scratch data
+tests/.tmp/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+Desktop.ini

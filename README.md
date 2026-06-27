@@ -1,6 +1,6 @@
 # 🌟 FireflyTools (流萤媒体工具箱)
 
-![Python Version](https://img.shields.io/badge/Python-3.8%2B-blue.svg)
+![Python Version](https://img.shields.io/badge/Python-3.10%2B-blue.svg)
 ![PyQt6](https://img.shields.io/badge/PyQt-v6-green.svg)
 ![Playwright](https://img.shields.io/badge/Playwright-Supported-orange.svg)
 ![License](https://img.shields.io/badge/License-MIT-success.svg)
@@ -75,42 +75,68 @@
 
 在运行本工具箱之前，请确保你的系统满足以下条件：
 
-1. **安装 Python 3.8+**
+1. **安装 Python 3.10+**。
 
-2. **安装核心第三方库**：
-   打开终端或命令行，运行以下命令：
+2. **创建虚拟环境并安装依赖**：
 
-   ```bash
-   pip install PyQt6 Pillow requests aiohttp m3u8 cryptography playwright
+   ```powershell
+   python -m venv .venv
+   .\.venv\Scripts\Activate.ps1
+   python -m pip install -r requirements.txt
    ```
 
-3. **安装 Playwright 浏览器内核**（用于视频嗅探）：
+3. **安装 Playwright Chromium 内核**（用于网页视频嗅探）：
 
-   Bash
-
-   ```
+   ```powershell
    playwright install chromium
    ```
 
-4. **配置 FFmpeg**：
+4. **FFmpeg**：
 
-   本工具的视频合并功能高度依赖 `FFmpeg`。请前往 [FFmpeg 官网](https://ffmpeg.org/download.html) 下载对应你操作系统的版本，解压后务必将其 `bin` 目录添加到系统的 **环境变量 (PATH)** 中。
+   Windows 版本已在 `tools/ffmpeg.exe` 中随仓库提供，程序启动时会自动加入子进程 `PATH`。Linux 和 macOS 用户需要自行安装 FFmpeg，并确保 `ffmpeg` 命令可用。
+
+`requirements.txt` 同时安装可选的 `yt-dlp` 后备引擎；只有在界面勾选对应选项且内置下载路径无法处理公开页面时才会使用它。
 
 ------
 
 ## 🚀 快速启动
 
-1. 将本仓库克隆到本地。
+1. 克隆仓库并进入项目根目录。
 
-2. 确保在工具箱根目录下包含一个名为 `pic` 的文件夹，并在里面放入几张 `.jpg` 或 `.png` 壁纸，用于启动动态 UI 引擎。
+2. 按上一节安装 Python 依赖和 Playwright Chromium。
 
-3. 运行主程序：
+3. 从项目根目录启动：
 
-   Bash
-
+   ```powershell
+   python -m tools.main
    ```
-   python main.py
-   ```
+
+仓库中的 `pic/` 会保留全部内置壁纸，标题栏可直接切换。默认下载目录为项目根目录下的 `downloads/`；下载切片、浏览器会话和其他运行数据会写入已被 Git 忽略的本地目录。
+
+------
+
+## 📁 仓库结构
+
+```text
+FireflyTools/
+├─ tools/                  # 主程序、四个工具模块、视频爬虫核心、FFmpeg
+├─ pic/                    # 全部内置 UI 壁纸
+├─ tests/                  # unittest 自动化测试
+├─ docs/                   # 项目介绍、计划、设计和实施记录
+├─ requirements.txt        # Python 运行依赖
+├─ LICENSE                 # MIT License
+└─ README.md
+```
+
+进一步了解当前架构，请阅读 `docs/project-overview.md`；历史实施计划统一归档在 `docs/plans/`。
+
+运行测试：
+
+```powershell
+$env:QT_QPA_PLATFORM='offscreen'
+$env:PYTHONDONTWRITEBYTECODE='1'
+python -m unittest discover -s tests -v
+```
 
 ------
 
