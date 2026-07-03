@@ -1,3 +1,5 @@
+"""使用 Playwright 诊断网页访问状态并嗅探真实媒体请求。"""
+
 import os
 import re
 from urllib.parse import urljoin, urlparse
@@ -26,9 +28,12 @@ MEDIA_URL_PATTERN = re.compile(
     ),
     re.IGNORECASE,
 )
+# 这里只识别带明确媒体后缀的 URL。过宽的“任意 URL”正则会把广告、
+# API 地址和 JavaScript 正则模板一并加入候选，降低后续探测可靠性。
 
 
 def _normalize_escaped_url_text(text: str) -> str:
+    """还原 JSON 风格 URL 转义，同时保留正则反斜杠供后续过滤。"""
     return (
         (text or "")
         .replace("\\/", "/")
@@ -39,6 +44,7 @@ def _normalize_escaped_url_text(text: str) -> str:
 
 
 def _is_probable_media_url(raw_url: str, absolute_url: str) -> bool:
+    """排除正则占位符并确认 URL 具有可识别媒体后缀。"""
     if "\\." in raw_url:
         return False
     parsed = urlparse(absolute_url)
@@ -53,12 +59,14 @@ def merge_media_request_headers(
     current: dict[str, str],
     incoming: dict[str, str],
 ) -> dict[str, str]:
+    """从媒体请求中增量合并允许继承的请求头。"""
     merged = dict(current)
     merged.update(extract_download_request_headers(incoming))
     return merged
 
 
 def classify_media_response(response_url: str, content_type: str = ""):
+    """综合响应 URL 与 content-type 构造媒体候选。"""
     lower_url = response_url.lower()
     lower_content_type = content_type.lower()
     if any(text in lower_url for text in AD_KEYWORDS):
@@ -116,6 +124,7 @@ def classify_media_response(response_url: str, content_type: str = ""):
 
 
 def extract_media_urls_from_text(base_url: str, text: str) -> list[str]:
+    """从 JSON、HTML 或脚本文本提取并去重媒体绝对地址。"""
     urls: list[str] = []
     seen: set[str] = set()
     normalized_text = _normalize_escaped_url_text(text)
@@ -135,6 +144,11 @@ def candidates_from_response_text(
     content_type: str,
     text: str,
 ) -> list[MediaCandidate]:
+    """把响应正文中发现的 URL 转换为带来源的候选对象。
+
+    正文候选比网络响应候选降低 5 分，因为页面脚本可能只是在配置或
+    模板中提到媒体地址；它们需要后续 playlist 探测才能成为可靠流。
+    """
     if not any(token in content_type.lower() for token in TEXT_RESPONSE_TYPES):
         return []
     candidates: list[MediaCandidate] = []
@@ -153,21 +167,46 @@ def candidates_from_response_text(
     return candidates
 
 
+def deduplicate_media_candidates(
+    candidates: list[MediaCandidate],
+) -> list[MediaCandidate]:
+    """按 URL 去重候选，并在相同地址出现真实请求时升级证据来源。"""
+    unique: list[MediaCandidate] = []
+    positions: dict[str, int] = {}
+    for candidate in candidates:
+        position = positions.get(candidate.url)
+        if position is None:
+            positions[candidate.url] = len(unique)
+            unique.append(candidate)
+            continue
+
+        current = unique[position]
+        current_rank = (current.source == "network", current.score)
+        incoming_rank = (candidate.source == "network", candidate.score)
+        if incoming_rank > current_rank:
+            # 保留首次发现位置，只替换该位置的证据强度和响应元数据。
+            unique[position] = candidate
+    return unique
+
+
 def should_continue_waiting_for_media(
     candidate_count: int,
     elapsed_seconds: float,
     limit_seconds: int,
     visible: bool = False,
 ) -> bool:
+    """根据候选是否出现和等待上限决定是否继续轮询。"""
     if elapsed_seconds >= limit_seconds:
         return False
     return candidate_count <= 0
 
 
 def has_reliable_media_candidate(candidates: list[MediaCandidate]) -> bool:
+    """仅把网络层 HLS 视为可提前结束等待的最高优先级证据。"""
+    # MP4 即使来自真实网络响应也可能是前贴广告或推荐短片。只有正片
+    # 优先级最高的网络 HLS 能提前收尾，其余候选必须等满观察窗口。
     return any(
-        candidate.source != "response-body"
-        and candidate.kind in {MediaKind.HLS, MediaKind.DIRECT_MP4, MediaKind.DASH}
+        candidate.source == "network" and candidate.kind == MediaKind.HLS
         for candidate in candidates
     )
 
@@ -175,6 +214,7 @@ def has_reliable_media_candidate(candidates: list[MediaCandidate]) -> bool:
 def detect_access_limited_page(
     snapshot: PageAccessSnapshot,
 ) -> VideoDownloadError | None:
+    """依据状态码和页面标题识别访问受限并构造结构化异常。"""
     title = snapshot.title.lower()
     if snapshot.status_code == 403 or any(
         keyword in title for keyword in ACCESS_LIMITED_TITLE_KEYWORDS
@@ -198,21 +238,30 @@ def detect_access_limited_page(
 
 
 class PageSniffer:
+    """驱动 Playwright 页面并收集媒体候选与浏览器会话。"""
     def __init__(
         self,
         headers=None,
         log_callback=None,
         options: SnifferOptions | None = None,
     ):
+        """保存初始请求头、日志回调和不可变的浏览器启动选项。"""
         self.headers = headers or {}
         self.log_callback = log_callback
         self.options = options or SnifferOptions()
 
     def log(self, message: str) -> None:
+        """将嗅探状态转发给调用方提供的日志回调。"""
         if self.log_callback:
             self.log_callback(message)
 
     def _launch_context(self, playwright):
+        """按配置创建普通浏览器上下文或持久化 Chromium 上下文。
+
+        Returns:
+            `(browser, context)`。持久化上下文自身拥有浏览器生命周期，
+            因而该模式返回的 `browser` 为 `None`，关闭时不能重复处理。
+        """
         launch_args = ["--mute-audio"]
         context_kwargs = {
             "extra_http_headers": self.headers,
@@ -238,6 +287,17 @@ class PageSniffer:
         return browser, context
 
     def sniff(self, page_url: str) -> DiagnosticReport:
+        """打开目标页面，收集媒体候选与会话，并返回结构化诊断报告。
+
+        Args:
+            page_url: 需要进入播放器并监听网络响应的网页地址。
+
+        Returns:
+            包含去重前候选列表、浏览器会话和非致命警告的诊断报告。
+
+        Raises:
+            VideoDownloadError: 主页面明确返回 403 或访问受限标题时抛出。
+        """
         from playwright.sync_api import sync_playwright
 
         candidates: list[MediaCandidate] = []
@@ -257,6 +317,7 @@ class PageSniffer:
             captured_headers = dict(self.headers)
 
             def handle_response(response):
+                """把单个 Playwright 响应转换为网络候选或正文候选。"""
                 nonlocal captured_headers
                 try:
                     content_type = response.headers.get("content-type", "")
@@ -271,6 +332,8 @@ class PageSniffer:
                                 body_text = response.text()
                             except Exception:
                                 body_text = ""
+                            # 限制正文读取规模，避免超大脚本/接口响应在工作线程
+                            # 中制造不受控内存占用。
                             for body_candidate in candidates_from_response_text(
                                 response.url,
                                 content_type,
@@ -291,15 +354,19 @@ class PageSniffer:
                     candidates.append(candidate)
                     warnings.extend(candidate_warnings)
                 except Exception:
+                    # Playwright 响应回调不能把单个跨域/已释放响应异常传播到
+                    # 整个页面事件循环；失败响应由后续候选继续补偿。
                     pass
 
             def wait_for_candidates():
+                """按可靠候选策略等待媒体请求，并为可视模式保留人工操作时间。"""
                 if self.options.visible:
                     self.log(
                         f"[*] 可视化嗅探等待 {self.options.manual_wait_seconds} 秒；"
                         "请在浏览器中完成允许的人工操作并点击播放。"
                     )
                 waited = 0.0
+                # 每秒轮询而非固定 sleep，可在真实网络候选出现后立即收尾。
                 while should_continue_waiting_for_media(
                     candidate_count=1 if has_reliable_media_candidate(candidates) else 0,
                     elapsed_seconds=waited,
@@ -308,6 +375,24 @@ class PageSniffer:
                 ):
                     page.wait_for_timeout(1000)
                     waited += 1.0
+
+                normalized = deduplicate_media_candidates(candidates)
+                counts: dict[str, int] = {}
+                for candidate in normalized:
+                    key = f"{candidate.kind.value}/{candidate.source}"
+                    counts[key] = counts.get(key, 0) + 1
+                count_text = ", ".join(
+                    f"{key}={value}" for key, value in sorted(counts.items())
+                ) or "无候选"
+                if has_reliable_media_candidate(candidates):
+                    self.log(
+                        f"[+] 嗅探观察结束: 已捕获网络 HLS；候选统计: {count_text}"
+                    )
+                else:
+                    self.log(
+                        f"[*] 嗅探观察结束: 已达到 {self.options.manual_wait_seconds} 秒"
+                        f"等待上限；候选统计: {count_text}"
+                    )
 
             page.on("response", handle_response)
             try:
@@ -343,6 +428,8 @@ class PageSniffer:
                     page.locator("video").first.click(timeout=3000)
                     wait_for_candidates()
                 except Exception:
+                    # 部分站点把播放器放在 iframe 或 canvas 中，无法直接定位
+                    # video 元素；点击视口中心是保守的通用触发手段。
                     try:
                         viewport = page.viewport_size or {"width": 1280, "height": 720}
                         page.mouse.click(viewport["width"] / 2, viewport["height"] / 2)
@@ -354,6 +441,8 @@ class PageSniffer:
             except Exception as exc:
                 warnings.append(f"页面加载异常或超时: {exc}")
             finally:
+                # 必须在 context/page 关闭前提取 Cookie、LocalStorage 和 UA；
+                # 下载适配器随后使用这些数据访问要求同一会话的 CDN。
                 cookies = tuple(context.cookies())
                 try:
                     local_storage = page.evaluate(
@@ -381,7 +470,7 @@ class PageSniffer:
 
         return DiagnosticReport(
             source_url=page_url,
-            candidates=candidates,
+            candidates=deduplicate_media_candidates(candidates),
             session=session,
             warnings=warnings,
         )

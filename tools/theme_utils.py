@@ -1,3 +1,5 @@
+"""根据壁纸颜色生成 PyQt6 全局主题，并提供通用阴影效果。"""
+
 import os
 from PyQt6.QtWidgets import QGraphicsDropShadowEffect
 from PyQt6.QtGui import QColor

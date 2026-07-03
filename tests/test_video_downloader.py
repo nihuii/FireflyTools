@@ -187,6 +187,20 @@ class FakeResponse:
         return None
 
 
+class FakeMetadataResponse:
+    def __init__(self, headers):
+        self.headers = headers
+
+    def raise_for_status(self):
+        return None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+
 class UniversalVideoSpiderTests(unittest.TestCase):
     def test_segment_downloads_obey_selected_concurrency(self):
         with tempfile.TemporaryDirectory(dir=TEST_TEMP_ROOT) as temp_dir:
@@ -343,10 +357,170 @@ class UniversalVideoSpiderTests(unittest.TestCase):
 
             with patch("tools.video_crawler.spider.PageSniffer") as sniffer_class:
                 sniffer_class.return_value.sniff.return_value = report
-
-                result = spider._sniff_real_url("https://example.invalid/watch")
+                with patch.object(
+                    spider,
+                    "_probe_mp4_size",
+                    return_value=50_000,
+                ):
+                    result = spider._sniff_real_url("https://example.invalid/watch")
 
             self.assertEqual(result, "https://cdn.example.invalid/video.mp4")
+
+    def test_select_best_mp4_prefers_larger_validated_network_candidate(self):
+        spider = UniversalVideoSpider(output_dir="downloads", temp_dir="temp")
+        candidates = [
+            MediaCandidate(
+                url="https://cdn.example.test/short.mp4",
+                kind=MediaKind.DIRECT_MP4,
+                source="network",
+                score=75,
+            ),
+            MediaCandidate(
+                url="https://cdn.example.test/main.mp4",
+                kind=MediaKind.DIRECT_MP4,
+                source="network",
+                score=75,
+            ),
+        ]
+
+        with patch.object(
+            spider,
+            "_probe_mp4_size",
+            side_effect=[1_000, 50_000],
+            create=True,
+        ):
+            selected = spider._select_best_mp4(candidates)
+
+        self.assertEqual(selected.url, "https://cdn.example.test/main.mp4")
+
+    def test_select_best_mp4_rejects_unverified_response_body_only_candidate(self):
+        spider = UniversalVideoSpider(output_dir="downloads", temp_dir="temp")
+        candidate = MediaCandidate(
+            url="https://cdn.example.test/short.mp4",
+            kind=MediaKind.DIRECT_MP4,
+            source="response-body",
+            score=70,
+        )
+
+        with patch.object(
+            spider,
+            "_probe_mp4_size",
+            return_value=None,
+            create=True,
+        ):
+            selected = spider._select_best_mp4([candidate])
+
+        self.assertIsNone(selected)
+
+    def test_probe_mp4_size_uses_head_content_length_without_get(self):
+        spider = UniversalVideoSpider(output_dir="downloads", temp_dir="temp")
+
+        with patch(
+            "tools.video_crawler.spider.requests.head",
+            return_value=FakeMetadataResponse({"Content-Length": "50000"}),
+        ):
+            with patch("tools.video_crawler.spider.requests.get") as get:
+                size = spider._probe_mp4_size(
+                    "https://cdn.example.test/main.mp4"
+                )
+
+        self.assertEqual(size, 50_000)
+        get.assert_not_called()
+
+    def test_probe_mp4_size_falls_back_to_range_get(self):
+        spider = UniversalVideoSpider(output_dir="downloads", temp_dir="temp")
+
+        with patch(
+            "tools.video_crawler.spider.requests.head",
+            return_value=FakeMetadataResponse({}),
+        ):
+            with patch(
+                "tools.video_crawler.spider.requests.get",
+                return_value=FakeMetadataResponse(
+                    {"Content-Range": "bytes 0-0/50000"}
+                ),
+            ) as get:
+                size = spider._probe_mp4_size(
+                    "https://cdn.example.test/main.mp4"
+                )
+
+        self.assertEqual(size, 50_000)
+        self.assertEqual(get.call_args.kwargs["headers"]["Range"], "bytes=0-0")
+        self.assertTrue(get.call_args.kwargs["stream"])
+
+    def test_probe_mp4_size_inherits_browser_session_headers(self):
+        spider = UniversalVideoSpider(
+            output_dir="downloads",
+            temp_dir="temp",
+            session_snapshot=BrowserSessionSnapshot(
+                user_agent="Browser UA",
+                referer="https://site.example/watch",
+                origin="https://site.example",
+                cookies=(
+                    {
+                        "name": "sid",
+                        "value": "abc",
+                        "domain": "cdn.example.test",
+                    },
+                ),
+                headers={"Authorization": "Bearer secret"},
+            ),
+        )
+
+        with patch(
+            "tools.video_crawler.spider.requests.head",
+            return_value=FakeMetadataResponse({"Content-Length": "50000"}),
+        ) as head:
+            size = spider._probe_mp4_size("https://cdn.example.test/main.mp4")
+
+        self.assertEqual(size, 50_000)
+        request_headers = head.call_args.kwargs["headers"]
+        self.assertEqual(request_headers["User-Agent"], "Browser UA")
+        self.assertEqual(request_headers["Referer"], "https://site.example/watch")
+        self.assertEqual(request_headers["Origin"], "https://site.example")
+        self.assertEqual(request_headers["Authorization"], "Bearer secret")
+        self.assertEqual(request_headers["Cookie"], "sid=abc")
+
+    def test_sniff_selection_is_independent_of_dash_and_mp4_discovery_order(self):
+        spider = UniversalVideoSpider(output_dir="downloads", temp_dir="temp")
+        report = DiagnosticReport(
+            source_url="https://site.example/watch",
+            candidates=[
+                MediaCandidate(
+                    url="https://cdn.example.test/stream.mpd",
+                    kind=MediaKind.DASH,
+                    source="network",
+                    score=65,
+                ),
+                MediaCandidate(
+                    url="https://cdn.example.test/short.mp4",
+                    kind=MediaKind.DIRECT_MP4,
+                    source="response-body",
+                    score=70,
+                ),
+                MediaCandidate(
+                    url="https://cdn.example.test/main.mp4",
+                    kind=MediaKind.DIRECT_MP4,
+                    source="network",
+                    score=75,
+                ),
+            ],
+        )
+        sizes = {
+            "https://cdn.example.test/short.mp4": 1_000,
+            "https://cdn.example.test/main.mp4": 50_000,
+        }
+
+        with patch("tools.video_crawler.spider.PageSniffer") as sniffer_class:
+            sniffer_class.return_value.sniff.return_value = report
+            with patch.object(
+                spider,
+                "_probe_mp4_size",
+                side_effect=lambda url: sizes.get(url),
+            ):
+                selected = spider._sniff_real_url("https://site.example/watch")
+
+        self.assertEqual(selected, "https://cdn.example.test/main.mp4")
 
     def test_webpage_run_inherits_sniffed_session_headers(self):
         with tempfile.TemporaryDirectory(dir=TEST_TEMP_ROOT) as temp_dir:
@@ -382,8 +556,13 @@ class UniversalVideoSpiderTests(unittest.TestCase):
 
             with patch("tools.video_crawler.spider.PageSniffer") as sniffer_class:
                 sniffer_class.return_value.sniff.return_value = report
-                with patch.object(spider, "_download_mp4", side_effect=fake_download_mp4):
-                    spider.run("https://example.test/watch", "video")
+                with patch.object(spider, "_probe_mp4_size", return_value=50_000):
+                    with patch.object(
+                        spider,
+                        "_download_mp4",
+                        side_effect=fake_download_mp4,
+                    ):
+                        spider.run("https://example.test/watch", "video")
 
             self.assertEqual(captured_headers["User-Agent"], "Browser UA")
             self.assertEqual(captured_headers["Referer"], "https://example.test/watch")
@@ -463,6 +642,61 @@ class UniversalVideoSpiderTests(unittest.TestCase):
         log_text = "\n".join(messages)
         self.assertIn("最高码率 3000k", log_text)
         self.assertIn("分辨率 1920x1080", log_text)
+
+    def test_select_best_m3u8_allows_slow_playlist_probe(self):
+        spider = UniversalVideoSpider(output_dir="downloads", temp_dir="temp")
+        playlist_url = "https://cdn.example.test/main.m3u8"
+        response = FakeResponse(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:8\n"
+            "#EXTINF:8,\n000.ts\n#EXT-X-ENDLIST\n"
+        )
+
+        with patch(
+            "tools.video_crawler.spider.requests.get",
+            return_value=response,
+        ) as get:
+            best_url, segment_count = spider._select_best_m3u8([playlist_url])
+
+        self.assertEqual(best_url, playlist_url)
+        self.assertEqual(segment_count, 1)
+        self.assertEqual(get.call_args.kwargs["timeout"], 15)
+
+    def test_select_best_m3u8_inherits_browser_session_headers(self):
+        spider = UniversalVideoSpider(
+            output_dir="downloads",
+            temp_dir="temp",
+            session_snapshot=BrowserSessionSnapshot(
+                user_agent="Browser UA",
+                referer="https://site.example/watch",
+                origin="https://site.example",
+                cookies=(
+                    {
+                        "name": "sid",
+                        "value": "abc",
+                        "domain": "cdn.example.test",
+                    },
+                ),
+                headers={"Authorization": "Bearer secret"},
+            ),
+        )
+        playlist_url = "https://cdn.example.test/main.m3u8"
+        response = FakeResponse(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:8\n"
+            "#EXTINF:8,\n000.ts\n#EXT-X-ENDLIST\n"
+        )
+
+        with patch(
+            "tools.video_crawler.spider.requests.get",
+            return_value=response,
+        ) as get:
+            spider._select_best_m3u8([playlist_url])
+
+        request_headers = get.call_args.kwargs["headers"]
+        self.assertEqual(request_headers["User-Agent"], "Browser UA")
+        self.assertEqual(request_headers["Referer"], "https://site.example/watch")
+        self.assertEqual(request_headers["Origin"], "https://site.example")
+        self.assertEqual(request_headers["Authorization"], "Bearer secret")
+        self.assertEqual(request_headers["Cookie"], "sid=abc")
 
     def test_m3u8_load_timeout_uses_network_timeout_code(self):
         spider = UniversalVideoSpider(output_dir="downloads", temp_dir="temp")
