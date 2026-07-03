@@ -1,3 +1,5 @@
+"""提供把子目录视频移动到根目录的图形化批处理工具。"""
+
 import os
 import shutil
 import threading
@@ -8,10 +10,12 @@ from tools.theme_utils import apply_shadow
 
 
 class VideoExtractorTool(QWidget):
+    """扫描目录树并把视频文件安全移动到所选根目录。"""
     log_signal = pyqtSignal(str)
     btn_state_signal = pyqtSignal(bool, str)
 
     def __init__(self):
+        """构建目录选择、清理选项、日志区和后台任务控制按钮。"""
         super().__init__()
         main_layout = QVBoxLayout(self)
         main_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -58,19 +62,23 @@ class VideoExtractorTool(QWidget):
         self.log_signal.emit("👋 欢迎使用！请点击上方的“浏览选择”按钮指定包含子文件夹的主目录。")
 
     def append_log(self, msg):
+        """把经过处理的消息追加到日志控件并滚动到底部。"""
         self.log_area.append(msg)
 
     def update_btn(self, enabled, text):
+        """根据当前输入是否完整更新执行按钮的可用状态。"""
         self.start_button.setEnabled(enabled)
         self.start_button.setText(text)
 
     def select_folder(self):
+        """打开目录选择器并把用户选择写回输入框。"""
         folder = QFileDialog.getExistingDirectory(self, "选择主文件夹")
         if folder:
             self.path_entry.setText(folder)
             self.log_signal.emit(f"已选择目标路径: {folder}")
 
     def start_processing(self):
+        """校验输入后启动后台批处理线程，避免阻塞 Qt 事件循环。"""
         folder_path = self.path_entry.text().strip()
         if not folder_path or not os.path.isdir(folder_path):
             QMessageBox.warning(self, "提示", "请先选择一个有效的主文件夹路径！")
@@ -81,6 +89,7 @@ class VideoExtractorTool(QWidget):
 
     # (核心业务逻辑保留不变)
     def extract_task(self, root_folder, need_clean):
+        """在后台扫描目录、移动视频并按选项清理空目录。"""
         self.btn_state_signal.emit(False, "正在处理中...")
         self.log_signal.emit("=" * 40)
         self.log_signal.emit(f"📂 开始扫描文件夹: {root_folder}")

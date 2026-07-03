@@ -1,3 +1,5 @@
+"""实现视频下载爬虫的 PyQt6 界面、任务队列和批次结果反馈。"""
+
 import os
 import threading
 import queue
@@ -21,11 +23,20 @@ from tools.video_crawler.spider import UniversalVideoSpider
 # 核心爬虫业务逻辑层 (严格对齐最新 fMP4+防广告 逻辑)
 # ==========================================
 class VideoDownloaderTool(QWidget):
+    """管理视频下载表单、任务队列、后台执行和批次结果展示。"""
+
+    # 工作线程不直接操作 Qt 控件；所有界面更新都通过信号切回主线程。
     log_signal = pyqtSignal(str)
     queue_pop_signal = pyqtSignal()
     batch_finished_signal = pyqtSignal(object)
 
     def __init__(self, start_worker=True, spider_factory=UniversalVideoSpider):
+        """初始化下载界面并按需启动队列工作线程。
+
+        Args:
+            start_worker: 是否立即启动永久消费队列的守护线程。测试可关闭它。
+            spider_factory: 创建爬虫实例的工厂，允许测试注入轻量替身。
+        """
         super().__init__()
         self.spider_factory = spider_factory
         self.task_queue = queue.Queue()
@@ -35,6 +46,8 @@ class VideoDownloaderTool(QWidget):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
 
+        # QScrollArea 默认会绘制不透明 viewport；这里同时关闭三层背景，
+        # 否则滚动区域会盖住主窗口的壁纸。
         self.scroll_area = QScrollArea()
         self.scroll_area.setObjectName("videoDownloaderScrollArea")
         self.scroll_area.setWidgetResizable(True)
@@ -188,19 +201,23 @@ class VideoDownloaderTool(QWidget):
             threading.Thread(target=self.queue_worker, daemon=True).start()
 
     def select_folder(self):
+        """打开目录选择器并把用户选择写回输入框。"""
         folder = QFileDialog.getExistingDirectory(self, "选择保存位置")
         if folder: self.path_entry.setText(folder)
 
     def append_log(self, message):
+        """把经过处理的消息追加到日志控件并滚动到底部。"""
         self.log_text.append(redact_for_display(message))
         scrollbar = self.log_text.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
     def pop_queue_ui(self):
+        """从界面列表移除已经被工作线程取走的队首任务。"""
         if self.queue_listbox.count() > 0:
             self.queue_listbox.takeItem(0)
 
     def toggle_mode(self):
+        """切换高速/稳定模式，并同步推荐并发数和按钮说明。"""
         self.is_high_speed_mode = not self.is_high_speed_mode
         if self.is_high_speed_mode:
             self.concurrency_spin.setValue(30)
@@ -212,6 +229,7 @@ class VideoDownloaderTool(QWidget):
             self.log_signal.emit("[*] 已切换至【低速稳定模式】: 带防封禁和退避重试，保证视频完整性。")
 
     def diagnose_current_url(self):
+        """校验 URL 后启动独立线程执行媒体诊断。"""
         url = self.url_entry.text().strip()
         if not url:
             QMessageBox.warning(self, "提示", "请先输入目标网址。")
@@ -219,6 +237,7 @@ class VideoDownloaderTool(QWidget):
         threading.Thread(target=self._diagnose_task, args=(url,), daemon=True).start()
 
     def _diagnose_task(self, url):
+        """使用当前嗅探设置生成诊断报告并发送到 UI 日志。"""
         try:
             from tools.video_crawler.diagnostics import VideoDiagnosticService
             from tools.video_crawler.reporting import format_diagnostic_report
@@ -243,11 +262,14 @@ class VideoDownloaderTool(QWidget):
             self.log_signal.emit(f"\n[X] 诊断失败: {exc}")
 
     def add_to_queue(self):
+        """校验表单并把当前所有下载设置快照为独立任务。"""
         url, name, save_dir = self.url_entry.text().strip(), self.name_entry.text().strip(), self.path_entry.text().strip()
         if not all([url, name, save_dir]):
             QMessageBox.warning(self, "警告", "请填写完整信息！")
             return
 
+        # 任务必须保存控件值的快照。若工作线程稍后再读取 UI，用户修改
+        # 下一项任务时会悄悄改变已排队任务的并发数或嗅探模式。
         task = {
             "url": url,
             "name": name,
@@ -265,6 +287,7 @@ class VideoDownloaderTool(QWidget):
         self.url_entry.clear()
 
     def _enqueue_task(self, task):
+        """复制任务、放入线程安全队列并更新队列列表。"""
         queued_task = dict(task)
         self.task_queue.put(queued_task)
         mode_label = "高速" if queued_task["is_high_speed"] else "稳定"
@@ -280,6 +303,7 @@ class VideoDownloaderTool(QWidget):
         )
 
     def _build_sniffer_options(self):
+        """把当前嗅探控件值转换为不可变配置对象。"""
         return SnifferOptions(
             headless=not self.visible_sniff_chk.isChecked(),
             use_persistent_profile=self.persistent_profile_chk.isChecked(),
@@ -287,7 +311,17 @@ class VideoDownloaderTool(QWidget):
         )
 
     def _execute_task(self, task):
+        """执行单个队列任务，并把异常统一转换为结构化结果字典。
+
+        Args:
+            task: 入队时冻结的下载参数字典。
+
+        Returns:
+            包含任务、成功状态、输出路径、引擎和错误元数据的字典。
+            该方法吞掉下载异常，保证永久工作线程不会因单项失败退出。
+        """
         try:
+            # 从任务快照重建配置，而不是读取可能已被用户修改的控件。
             sniffer_options = SnifferOptions(
                 headless=task.get("sniffer_headless", True),
                 use_persistent_profile=task.get(
@@ -338,6 +372,8 @@ class VideoDownloaderTool(QWidget):
                 "retryable": e.retryable,
             }
         except Exception as e:
+            # 仅真正未分类的异常落入 UNKNOWN；已知下载失败应在核心层
+            # 提前包装为 VideoDownloadError，以便 UI 给出准确建议。
             self.log_signal.emit(f"\n[X] 错误: {e}")
             return {
                 "task": task,
@@ -350,12 +386,14 @@ class VideoDownloaderTool(QWidget):
 
     @staticmethod
     def _should_use_ytdlp_fallback(task, error):
+        """判断内置失败是否满足用户启用的 yt-dlp 后备条件。"""
         return bool(task.get("use_ytdlp_fallback", False)) and error.code in {
             VideoErrorCode.NO_MEDIA_FOUND,
             VideoErrorCode.UNSUPPORTED_DASH,
         }
 
     def _execute_ytdlp_fallback(self, task):
+        """调用 yt-dlp 后备适配器并返回与内置流程一致的结果。"""
         self.log_signal.emit("[*] 内置下载未命中可处理媒体，尝试 yt-dlp 外部后备引擎...")
         adapter = YtDlpAdapter(
             enabled=True,
@@ -372,20 +410,24 @@ class VideoDownloaderTool(QWidget):
         }
 
     def _finish_task(self, result):
+        """记录任务结果、维护队列计数并在批次结束时发射信号。"""
         self._batch_results.append(result)
         self.task_queue.task_done()
         if self.task_queue.unfinished_tasks == 0:
+            # 发射副本后立即清空内部列表，使下一批任务从干净状态开始。
             completed_batch = list(self._batch_results)
             self._batch_results.clear()
             self.batch_finished_signal.emit(completed_batch)
 
     def retry_failed_tasks(self, results):
+        """按原始配置重新入队所有标记为可重试的失败任务。"""
         for result in results:
             if not result["success"] and result.get("retryable", True):
                 self._enqueue_task(result["task"])
 
     @staticmethod
     def has_retryable_failures(results):
+        """判断批次结果中是否至少包含一个可重试失败。"""
         return any(
             not result["success"] and result.get("retryable", True)
             for result in results
@@ -393,6 +435,11 @@ class VideoDownloaderTool(QWidget):
 
     @staticmethod
     def format_batch_results(results):
+        """生成批次成功、失败、错误统计和重试建议文本。
+
+        结果文本只依赖结构化字段，不解析异常字符串；这样核心层调整错误
+        文案时不会破坏 UI 的重试判断和分组统计。
+        """
         succeeded = [result for result in results if result["success"]]
         failed = [result for result in results if not result["success"]]
         summary = f"队列处理完成：成功 {len(succeeded)} 个，失败 {len(failed)} 个。"
@@ -445,10 +492,12 @@ class VideoDownloaderTool(QWidget):
 
     @staticmethod
     def _format_success_line(result):
+        """格式化单个成功任务，并标注实际使用的下载引擎。"""
         engine_label = " [yt-dlp 外部引擎]" if result.get("engine") == "yt-dlp" else ""
         return f"  ✓ {result['task']['name']}{engine_label}"
 
     def show_batch_results(self, results):
+        """显示批次汇总对话框，并按结果决定是否提供重试按钮。"""
         summary, details = self.format_batch_results(results)
         failed = [result for result in results if not result["success"]]
 
@@ -471,6 +520,11 @@ class VideoDownloaderTool(QWidget):
             self.retry_failed_tasks(results)
 
     def queue_worker(self):
+        """持续消费线程安全队列，在后台顺序执行下载任务。
+
+        该守护线程设计为与工具生命周期一致，因此没有正常退出分支。
+        所有 Qt 更新均通过信号完成，避免跨线程直接访问控件。
+        """
         while True:
             task = self.task_queue.get()
             self.queue_pop_signal.emit()

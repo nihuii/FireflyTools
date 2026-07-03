@@ -1,7 +1,10 @@
+"""定义视频下载流程使用的结构化错误码和异常。"""
+
 from enum import Enum
 
 
 class VideoErrorCode(str, Enum):
+    """枚举可向 UI 和批处理结果稳定传递的错误类别。"""
     UNKNOWN = "UNKNOWN"
     NETWORK_TIMEOUT = "NETWORK_TIMEOUT"
     HTTP_FORBIDDEN = "HTTP_FORBIDDEN"
@@ -19,6 +22,14 @@ class VideoDownloadError(RuntimeError):
     """视频任务失败，带结构化错误码和用户可读消息。"""
 
     def __init__(self, code_or_message, message=None, *, details=None, retryable=False):
+        """创建结构化异常，并兼容只传字符串的旧调用方式。
+
+        Args:
+            code_or_message: `VideoErrorCode`，或旧接口传入的错误字符串。
+            message: 面向用户的简洁说明；省略时使用错误码文本。
+            details: 仅供诊断的结构化上下文，不应直接泄漏敏感 Header。
+            retryable: UI 是否可以安全建议用户按原配置重试。
+        """
         if isinstance(code_or_message, VideoErrorCode):
             code = code_or_message
             final_message = message or code.value

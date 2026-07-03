@@ -11,6 +11,7 @@ from tools.video_crawler.models import (
 from tools.video_crawler.sniffer import (
     PageSniffer,
     candidates_from_response_text,
+    deduplicate_media_candidates,
     detect_access_limited_page,
     has_reliable_media_candidate,
     should_continue_waiting_for_media,
@@ -57,6 +58,35 @@ class PageSnifferAccessFlowTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, VideoErrorCode.HTTP_FORBIDDEN)
 
+    def test_sniff_waits_past_network_mp4_for_hls_and_deduplicates_candidates(self):
+        page = SequencedMediaPage()
+        logs = []
+        with patch(
+            "playwright.sync_api.sync_playwright",
+            return_value=FakePlaywrightManager(FakePlaywright(page)),
+        ):
+            report = PageSniffer(
+                log_callback=logs.append,
+                options=SnifferOptions(manual_wait_seconds=10)
+            ).sniff("https://site.example/watch")
+
+        mp4_candidates = [
+            candidate
+            for candidate in report.candidates
+            if candidate.kind == MediaKind.DIRECT_MP4
+        ]
+        hls_candidates = [
+            candidate
+            for candidate in report.candidates
+            if candidate.kind == MediaKind.HLS
+        ]
+        self.assertEqual(page.wait_calls, 2)
+        self.assertEqual(len(mp4_candidates), 1)
+        self.assertEqual(mp4_candidates[0].source, "network")
+        self.assertEqual(len(hls_candidates), 1)
+        self.assertEqual(hls_candidates[0].source, "network")
+        self.assertTrue(any("捕获网络 HLS" in message for message in logs))
+
 
 class SnifferOptionsTests(unittest.TestCase):
     def test_default_options_are_headless_and_non_persistent(self):
@@ -100,6 +130,34 @@ class ResponseTextCandidateTests(unittest.TestCase):
         self.assertEqual(candidates[0].source, "response-body")
 
 
+class MediaCandidateDeduplicationTests(unittest.TestCase):
+    def test_response_body_candidate_is_upgraded_by_matching_network_response(self):
+        url = "https://cdn.example.test/ad.mp4"
+
+        candidates = deduplicate_media_candidates(
+            [
+                MediaCandidate(
+                    url=url,
+                    kind=MediaKind.DIRECT_MP4,
+                    source="response-body",
+                    score=70,
+                ),
+                MediaCandidate(
+                    url=url,
+                    kind=MediaKind.DIRECT_MP4,
+                    source="network",
+                    score=75,
+                    content_type="video/mp4",
+                ),
+            ]
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].source, "network")
+        self.assertEqual(candidates[0].score, 75)
+        self.assertEqual(candidates[0].content_type, "video/mp4")
+
+
 class MediaWaitPolicyTests(unittest.TestCase):
     def test_response_body_candidate_is_not_reliable_for_wait_stop(self):
         candidates = [
@@ -112,7 +170,18 @@ class MediaWaitPolicyTests(unittest.TestCase):
 
         self.assertFalse(has_reliable_media_candidate(candidates))
 
-    def test_network_candidate_is_reliable_for_wait_stop(self):
+    def test_network_mp4_is_not_reliable_for_wait_stop(self):
+        candidates = [
+            MediaCandidate(
+                url="https://cdn.example.test/ad.mp4",
+                kind=MediaKind.DIRECT_MP4,
+                source="network",
+            )
+        ]
+
+        self.assertFalse(has_reliable_media_candidate(candidates))
+
+    def test_network_hls_is_reliable_for_wait_stop(self):
         candidates = [
             MediaCandidate(
                 url="https://cdn.example.test/index.m3u8",
@@ -173,18 +242,21 @@ class FakePlaywrightManager:
 
 
 class FakePlaywright:
-    def __init__(self):
-        self.chromium = FakeChromium()
+    def __init__(self, page=None):
+        self.chromium = FakeChromium(page)
 
 
 class FakeChromium:
+    def __init__(self, page=None):
+        self.page = page
+
     def launch(self, **kwargs):
-        return FakeBrowser()
+        return FakeBrowser(self.page)
 
 
 class FakeBrowser:
-    def __init__(self):
-        self.context = FakeContext()
+    def __init__(self, page=None):
+        self.context = FakeContext(page)
         self.closed = False
 
     def new_context(self, **kwargs):
@@ -195,8 +267,8 @@ class FakeBrowser:
 
 
 class FakeContext:
-    def __init__(self):
-        self.page = FakePage()
+    def __init__(self, page=None):
+        self.page = page or FakePage()
         self.pages = []
         self.closed = False
 
@@ -260,6 +332,87 @@ class FakeLocator:
 class FakeMouse:
     def click(self, x, y):
         return None
+
+
+class FakeRequest:
+    def __init__(self, resource_type):
+        self.resource_type = resource_type
+        self.headers = {}
+
+
+class FakeObservedResponse:
+    def __init__(self, url, content_type, resource_type, text=""):
+        self.url = url
+        self.headers = {"content-type": content_type}
+        self.request = FakeRequest(resource_type)
+        self._text = text
+
+    def text(self):
+        return self._text
+
+
+class SequencedMediaPage:
+    url = "https://site.example/watch"
+    viewport_size = {"width": 1280, "height": 720}
+
+    def __init__(self):
+        self.mouse = FakeMouse()
+        self.response_callback = None
+        self.wait_calls = 0
+        self.mp4_url = "https://cdn.example.test/short.mp4"
+        self.hls_url = "https://cdn.example.test/main.m3u8"
+
+    def on(self, event_name, callback):
+        if event_name == "response":
+            self.response_callback = callback
+
+    def goto(self, page_url, **kwargs):
+        self.response_callback(
+            FakeObservedResponse(
+                page_url,
+                "application/json",
+                "document",
+                text=f'{{"preview":"{self.mp4_url}"}}',
+            )
+        )
+        return FakeMainResponse(status=200)
+
+    def title(self):
+        return "Regular Video Page"
+
+    def locator(self, selector):
+        return FakeMediaLocator()
+
+    def wait_for_timeout(self, timeout):
+        self.wait_calls += 1
+        if self.wait_calls == 1:
+            self.response_callback(
+                FakeObservedResponse(
+                    self.mp4_url,
+                    "video/mp4",
+                    "media",
+                )
+            )
+        elif self.wait_calls == 2:
+            self.response_callback(
+                FakeObservedResponse(
+                    self.hls_url,
+                    "application/vnd.apple.mpegurl",
+                    "media",
+                )
+            )
+
+    def evaluate(self, script):
+        if "localStorage" in script:
+            return {}
+        if "navigator.userAgent" in script:
+            return "Fake UA"
+        return None
+
+
+class FakeMediaLocator(FakeLocator):
+    def count(self):
+        return 1
 
 
 if __name__ == "__main__":

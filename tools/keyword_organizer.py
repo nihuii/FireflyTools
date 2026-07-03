@@ -1,3 +1,5 @@
+"""提供按文件名关键字归档图片和视频的图形化工具。"""
+
 import os
 import shutil
 import threading
@@ -9,10 +11,12 @@ from tools.theme_utils import apply_shadow
 
 class KeywordOrganizerTool(QWidget):
     # 定义用于跨线程更新 UI 的信号
+    """根据关键字把支持的媒体文件移动到对应归档目录。"""
     log_signal = pyqtSignal(str)
     btn_state_signal = pyqtSignal(bool, str)
 
     def __init__(self):
+        """构建目录/关键字输入、日志区及线程安全的状态信号。"""
         super().__init__()
 
         # --- UI 界面搭建 ---
@@ -65,21 +69,25 @@ class KeywordOrganizerTool(QWidget):
         self.btn_state_signal.connect(self.update_btn)
 
     def append_log(self, msg):
+        """把经过处理的消息追加到日志控件并滚动到底部。"""
         self.log_area.append(msg)
         # 自动滚动到底部
         scrollbar = self.log_area.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
     def update_btn(self, enabled, text):
+        """根据当前输入是否完整更新执行按钮的可用状态。"""
         self.start_btn.setEnabled(enabled)
         self.start_btn.setText(text)
 
     def select_folder(self):
+        """打开目录选择器并把用户选择写回输入框。"""
         folder = QFileDialog.getExistingDirectory(self, "选择主文件夹")
         if folder:
             self.path_entry.setText(folder)
 
     def start_processing(self):
+        """校验输入后启动后台批处理线程，避免阻塞 Qt 事件循环。"""
         folder_path = self.path_entry.text().strip()
         keyword = self.keyword_entry.text().strip()
 

@@ -1,3 +1,5 @@
+"""提供批量图片缩放、裁剪和格式转换的 PyQt6 工具。"""
+
 import os
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
                              QPushButton, QRadioButton, QListWidget, QFileDialog, QMessageBox, QFrame, QApplication)
@@ -8,7 +10,9 @@ from tools.theme_utils import apply_shadow
 
 
 class SmartImageResizerTool(QWidget):
+    """批量读取图片并按目标尺寸和重心策略进行裁剪。"""
     def __init__(self):
+        """构建图片选择、目标尺寸、裁剪重心和输出目录控件。"""
         super().__init__()
         self.file_paths = []
         self.output_dir = os.path.join(os.path.expanduser("~"), "Desktop", "Processed_Images")
@@ -78,12 +82,14 @@ class SmartImageResizerTool(QWidget):
         layout.addWidget(self.status_label)
 
     def choose_output_dir(self):
+        """选择图片处理结果的输出目录。"""
         selected_dir = QFileDialog.getExistingDirectory(self, "选择保存位置")
         if selected_dir:
             self.output_dir = selected_dir
             self.path_entry.setText(self.output_dir)
 
     def select_files(self):
+        """选择待处理图片并在界面中更新文件计数。"""
         files, _ = QFileDialog.getOpenFileNames(self, "选择图片", "", "Images (*.jpg *.jpeg *.png *.bmp *.webp *.tiff)")
         if files:
             self.file_paths = files
@@ -92,6 +98,7 @@ class SmartImageResizerTool(QWidget):
             self.status_label.setText(f"已导入 {len(files)} 张图片")
 
     def start_processing(self):
+        """校验输入后启动后台批处理线程，避免阻塞 Qt 事件循环。"""
         if not self.file_paths:
             QMessageBox.warning(self, "提示", "请先导入图片！")
             return
