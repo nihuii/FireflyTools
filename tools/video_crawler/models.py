@@ -94,7 +94,7 @@ class SnifferOptions:
     #: 持久化 profile 的本地目录；其中可能含敏感会话信息，禁止提交 Git。
     profile_dir: str = "./browser_profiles/video_crawler"
     #: 等待播放器产生可靠媒体请求的最长秒数。
-    manual_wait_seconds: int = 10
+    manual_wait_seconds: int = 25
 
     # @property 是 Python 的一个装饰器，可以把一个方法变成“属性”来访问。
     @property
@@ -113,6 +113,8 @@ class DiagnosticReport:
     candidates: list[MediaCandidate] = field(default_factory=list)
     #: 嗅探结束时捕获的浏览器会话；未启动浏览器时使用空快照。
     session: BrowserSessionSnapshot = field(default_factory=BrowserSessionSnapshot)
+    #: 导航或早期页面诊断是否异常；为 True 时不能把空候选视为确定无媒体。
+    navigation_incomplete: bool = False
     #: 不阻止继续分析、但需要向用户说明的诊断信息。
     warnings: list[str] = field(default_factory=list)
     #: 诊断阶段收集的错误文本；任务级失败优先使用 VideoDownloadError 表达。

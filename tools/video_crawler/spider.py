@@ -531,6 +531,8 @@ class UniversalVideoSpider:
             log_callback=self.log,
             options=self.sniffer_options,
         ).sniff(page_url)
+        for warning in report.warnings:
+            self.log(f"[!] 嗅探警告: {warning}")
         # 会话快照稍后由 _resolve_candidate 按最终媒体域名筛选并合并。
         self.session_snapshot = report.session
         candidates = deduplicate_media_candidates(report.candidates)
@@ -584,6 +586,10 @@ class UniversalVideoSpider:
             candidate
             for candidate in candidates
             if candidate.kind == MediaKind.DIRECT_MP4
+            and (
+                not report.navigation_incomplete
+                or candidate.source == "network"
+            )
         ]
         selected_mp4 = self._select_best_mp4(mp4_candidates)
         if selected_mp4 is not None:
@@ -594,7 +600,13 @@ class UniversalVideoSpider:
             return selected_mp4.url
 
         dash_candidates = [
-            candidate for candidate in candidates if candidate.kind == MediaKind.DASH
+            candidate
+            for candidate in candidates
+            if candidate.kind == MediaKind.DASH
+            and (
+                not report.navigation_incomplete
+                or candidate.source == "network"
+            )
         ]
         if dash_candidates:
             selected_dash = max(
@@ -610,6 +622,17 @@ class UniversalVideoSpider:
                 f"(来源={selected_dash.source})。"
             )
             return selected_dash.url
+
+        if report.navigation_incomplete:
+            raise VideoDownloadError(
+                VideoErrorCode.NETWORK_TIMEOUT,
+                "页面导航未完整结束，且观察窗口内未捕获可验证的视频流。",
+                details={
+                    "warnings": list(report.warnings),
+                    "candidate_count": len(candidates),
+                },
+                retryable=True,
+            )
         return None
 
     def _download_mp4(self, video_url: str, save_path: str):

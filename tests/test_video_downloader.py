@@ -366,6 +366,76 @@ class UniversalVideoSpiderTests(unittest.TestCase):
 
             self.assertEqual(result, "https://cdn.example.invalid/video.mp4")
 
+    def test_incomplete_navigation_without_candidate_is_retryable_timeout(self):
+        spider = UniversalVideoSpider(output_dir="downloads", temp_dir="temp")
+        report = DiagnosticReport(
+            source_url="https://site.example/watch",
+            navigation_incomplete=True,
+            warnings=["页面加载异常或超时: domcontentloaded timeout"],
+        )
+
+        with patch("tools.video_crawler.spider.PageSniffer") as sniffer_class:
+            sniffer_class.return_value.sniff.return_value = report
+            with self.assertRaises(VideoDownloadError) as raised:
+                spider._sniff_real_url("https://site.example/watch")
+
+        self.assertEqual(raised.exception.code, VideoErrorCode.NETWORK_TIMEOUT)
+        self.assertTrue(raised.exception.retryable)
+        self.assertIn("导航未完整结束", str(raised.exception))
+
+    def test_incomplete_navigation_does_not_select_response_body_only_mp4(self):
+        spider = UniversalVideoSpider(output_dir="downloads", temp_dir="temp")
+        report = DiagnosticReport(
+            source_url="https://site.example/watch",
+            candidates=[
+                MediaCandidate(
+                    url="https://cdn.example.test/preview.mp4",
+                    kind=MediaKind.DIRECT_MP4,
+                    source="response-body",
+                    score=70,
+                )
+            ],
+            navigation_incomplete=True,
+            warnings=["页面加载异常或超时"],
+        )
+
+        with patch("tools.video_crawler.spider.PageSniffer") as sniffer_class:
+            sniffer_class.return_value.sniff.return_value = report
+            with patch.object(spider, "_probe_mp4_size") as probe:
+                with self.assertRaises(VideoDownloadError) as raised:
+                    spider._sniff_real_url("https://site.example/watch")
+
+        self.assertEqual(raised.exception.code, VideoErrorCode.NETWORK_TIMEOUT)
+        probe.assert_not_called()
+
+    def test_incomplete_navigation_can_use_verified_hls(self):
+        spider = UniversalVideoSpider(output_dir="downloads", temp_dir="temp")
+        hls_url = "https://cdn.example.test/main.m3u8"
+        report = DiagnosticReport(
+            source_url="https://site.example/watch",
+            candidates=[
+                MediaCandidate(
+                    url=hls_url,
+                    kind=MediaKind.HLS,
+                    source="network",
+                    score=80,
+                )
+            ],
+            navigation_incomplete=True,
+            warnings=["页面加载异常或超时"],
+        )
+
+        with patch("tools.video_crawler.spider.PageSniffer") as sniffer_class:
+            sniffer_class.return_value.sniff.return_value = report
+            with patch.object(
+                spider,
+                "_select_best_m3u8",
+                return_value=(hls_url, 553),
+            ):
+                selected = spider._sniff_real_url("https://site.example/watch")
+
+        self.assertEqual(selected, hls_url)
+
     def test_select_best_mp4_prefers_larger_validated_network_candidate(self):
         spider = UniversalVideoSpider(output_dir="downloads", temp_dir="temp")
         candidates = [
@@ -884,6 +954,9 @@ class VideoDownloaderToolTests(unittest.TestCase):
         self.tool.toggle_mode()
         self.assertEqual(self.tool.concurrency_spin.value(), 5)
 
+    def test_default_sniff_wait_is_25_seconds(self):
+        self.assertEqual(self.tool.sniff_wait_spin.value(), 25)
+
     def test_diagnose_button_is_available(self):
         self.assertEqual(self.tool.diagnose_btn.text(), "诊断链接")
 
@@ -1063,6 +1136,34 @@ class VideoDownloaderToolTests(unittest.TestCase):
         self.assertTrue(options.use_persistent_profile)
         self.assertEqual(options.manual_wait_seconds, 33)
         tool.close()
+
+    def test_worker_uses_25_second_wait_for_legacy_task_snapshot(self):
+        tool = VideoDownloaderTool(
+            start_worker=False,
+            spider_factory=RecordingSpider,
+        )
+        task = {
+            "url": "https://example.test/watch",
+            "name": "video",
+            "save_dir": "downloads",
+            "is_high_speed": False,
+            "segment_concurrency": 5,
+            "resume_enabled": True,
+            "live_record_seconds": 300,
+        }
+
+        try:
+            result = tool._execute_task(task)
+        finally:
+            tool.close()
+
+        self.assertTrue(result["success"])
+        self.assertEqual(
+            RecordingSpider.init_kwargs[
+                "sniffer_options"
+            ].manual_wait_seconds,
+            25,
+        )
 
     def test_execute_task_returns_structured_video_error(self):
         tool = VideoDownloaderTool(

@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import patch
 
+import tools.video_crawler.sniffer as sniffer_module
 from tools.video_crawler.errors import VideoDownloadError, VideoErrorCode
 from tools.video_crawler.models import (
     MediaCandidate,
@@ -94,7 +95,7 @@ class SnifferOptionsTests(unittest.TestCase):
 
         self.assertTrue(options.headless)
         self.assertFalse(options.use_persistent_profile)
-        self.assertEqual(options.manual_wait_seconds, 10)
+        self.assertEqual(options.manual_wait_seconds, 25)
         self.assertFalse(options.visible)
 
     def test_profile_dir_defaults_to_workspace_relative_path(self):
@@ -413,6 +414,126 @@ class SequencedMediaPage:
 class FakeMediaLocator(FakeLocator):
     def count(self):
         return 1
+
+
+class NavigationTimeoutMediaPage(SequencedMediaPage):
+    def goto(self, page_url, **kwargs):
+        raise TimeoutError("domcontentloaded timeout")
+
+
+class PageSnifferNavigationRecoveryTests(unittest.TestCase):
+    def test_navigation_timeout_still_waits_and_captures_delayed_hls(self):
+        page = NavigationTimeoutMediaPage()
+        logs = []
+        with patch(
+            "playwright.sync_api.sync_playwright",
+            return_value=FakePlaywrightManager(FakePlaywright(page)),
+        ):
+            report = PageSniffer(
+                log_callback=logs.append,
+                options=SnifferOptions(manual_wait_seconds=10),
+            ).sniff("https://site.example/watch")
+
+        hls_candidates = [
+            candidate
+            for candidate in report.candidates
+            if candidate.kind == MediaKind.HLS
+        ]
+        self.assertTrue(report.navigation_incomplete)
+        self.assertEqual(len(hls_candidates), 1)
+        self.assertEqual(hls_candidates[0].source, "network")
+        self.assertEqual(page.wait_calls, 2)
+        self.assertTrue(any("继续观察媒体请求" in message for message in logs))
+
+
+class RecordingVideoLocator(FakeLocator):
+    def __init__(self, count):
+        self._count = count
+        self.clicked = False
+
+    def count(self):
+        return self._count
+
+    def click(self, **kwargs):
+        self.clicked = True
+
+
+class RecordingFrame:
+    def __init__(self, video_count):
+        self.video_locator = RecordingVideoLocator(video_count)
+
+    def locator(self, selector):
+        self.last_selector = selector
+        return self.video_locator
+
+
+class IframePlaybackPage:
+    viewport_size = {"width": 1280, "height": 720}
+
+    def __init__(self):
+        self.top_frame = RecordingFrame(0)
+        self.player_frame = RecordingFrame(1)
+        self.frames = [self.top_frame, self.player_frame]
+        self.mouse = FakeMouse()
+
+
+class PlaybackTriggerTests(unittest.TestCase):
+    def test_trigger_playback_clicks_video_inside_iframe(self):
+        page = IframePlaybackPage()
+
+        trigger = sniffer_module.trigger_playback(page)
+
+        self.assertEqual(trigger, "frame-video")
+        self.assertTrue(page.player_frame.video_locator.clicked)
+
+
+class ResponseBodyReadPolicyTests(unittest.TestCase):
+    def test_reads_small_json_response(self):
+        self.assertTrue(
+            sniffer_module.should_read_response_text("application/json", "4096")
+        )
+
+    def test_skips_non_text_response_before_calling_response_text(self):
+        self.assertFalse(
+            sniffer_module.should_read_response_text(
+                "application/octet-stream",
+                "4096",
+            )
+        )
+
+    def test_skips_known_response_larger_than_limit(self):
+        self.assertFalse(
+            sniffer_module.should_read_response_text(
+                "text/javascript",
+                "1000001",
+            )
+        )
+
+    def test_allows_text_response_with_unknown_size(self):
+        self.assertTrue(
+            sniffer_module.should_read_response_text("text/html", "")
+        )
+
+
+class MediaObservationDeadlineTests(unittest.TestCase):
+    def test_observation_uses_monotonic_deadline(self):
+        page = SequencedMediaPage()
+        monotonic_values = iter([100.0, 100.0, 100.4, 101.1])
+
+        with patch(
+            "playwright.sync_api.sync_playwright",
+            return_value=FakePlaywrightManager(FakePlaywright(page)),
+        ):
+            with patch(
+                "tools.video_crawler.sniffer.time.monotonic",
+                side_effect=lambda: next(monotonic_values),
+            ):
+                report = PageSniffer(
+                    options=SnifferOptions(manual_wait_seconds=1)
+                ).sniff("https://site.example/watch")
+
+        self.assertLessEqual(page.wait_calls, 2)
+        self.assertIsInstance(report.candidates, list)
 
 
 if __name__ == "__main__":

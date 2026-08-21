@@ -2,9 +2,11 @@
 
 import os
 import re
+import time
 from urllib.parse import urljoin, urlparse
 
 from tools.video_crawler.errors import VideoDownloadError, VideoErrorCode
+from tools.video_crawler.logging_utils import redact_for_display
 from tools.video_crawler.models import (
     BrowserSessionSnapshot,
     DiagnosticReport,
@@ -19,6 +21,7 @@ from tools.video_crawler.session import extract_download_request_headers
 AD_KEYWORDS = ("ad.", "/ad/", "adv", "blank", "preview", "v.admaster")
 ACCESS_LIMITED_TITLE_KEYWORDS = ("403", "访问受限", "access denied", "forbidden")
 TEXT_RESPONSE_TYPES = ("json", "javascript", "text/", "html")
+MAX_RESPONSE_TEXT_BYTES = 1_000_000
 MEDIA_URL_PATTERN = re.compile(
     (
         r"(?P<url>"
@@ -30,6 +33,24 @@ MEDIA_URL_PATTERN = re.compile(
 )
 # 这里只识别带明确媒体后缀的 URL。过宽的“任意 URL”正则会把广告、
 # API 地址和 JavaScript 正则模板一并加入候选，降低后续探测可靠性。
+
+
+def should_read_response_text(
+    content_type: str,
+    content_length: str,
+    max_bytes: int = MAX_RESPONSE_TEXT_BYTES,
+) -> bool:
+    """只允许已知文本类型且未明确超限的响应进入正文提取。"""
+    if not any(
+        token in (content_type or "").lower()
+        for token in TEXT_RESPONSE_TYPES
+    ):
+        return False
+    try:
+        known_size = int(content_length)
+    except (TypeError, ValueError):
+        return True
+    return 0 <= known_size <= max_bytes
 
 
 def _normalize_escaped_url_text(text: str) -> str:
@@ -237,6 +258,30 @@ def detect_access_limited_page(
     return None
 
 
+def trigger_playback(page) -> str:
+    """优先点击主页面或 iframe 中的 video，最后点击视口中心。"""
+    frames = list(getattr(page, "frames", ()) or ())
+    if not frames:
+        frames = [page]
+
+    for frame in frames:
+        try:
+            video = frame.locator("video")
+            if video.count() > 0:
+                video.first.click(timeout=3000)
+                return "frame-video"
+        except Exception:
+            # 跨域 frame 或已销毁 frame 可能无法查询 DOM，继续尝试下一层。
+            continue
+
+    try:
+        viewport = page.viewport_size or {"width": 1280, "height": 720}
+        page.mouse.click(viewport["width"] / 2, viewport["height"] / 2)
+        return "viewport-center"
+    except Exception:
+        return "none"
+
+
 class PageSniffer:
     """驱动 Playwright 页面并收集媒体候选与浏览器会话。"""
     def __init__(
@@ -315,6 +360,7 @@ class PageSniffer:
             browser, context = self._launch_context(p)
             page = context.pages[0] if context.pages else context.new_page()
             captured_headers = dict(self.headers)
+            navigation_incomplete = False
 
             def handle_response(response):
                 """把单个 Playwright 响应转换为网络候选或正文候选。"""
@@ -327,17 +373,34 @@ class PageSniffer:
                     )
                     if candidate is None:
                         resource_type = response.request.resource_type
-                        if resource_type in {"xhr", "fetch", "document", "script"}:
+                        content_length = response.headers.get(
+                            "content-length",
+                            "",
+                        )
+                        if (
+                            resource_type in {"xhr", "fetch", "document", "script"}
+                            and should_read_response_text(
+                                content_type,
+                                content_length,
+                            )
+                        ):
                             try:
                                 body_text = response.text()
-                            except Exception:
+                            except Exception as exc:
+                                warning = (
+                                    "响应正文读取失败: "
+                                    f"{type(exc).__name__}"
+                                )
+                                if warning not in warnings and len(warnings) < 10:
+                                    warnings.append(warning)
+                                    self.log(f"[!] {warning}")
                                 body_text = ""
                             # 限制正文读取规模，避免超大脚本/接口响应在工作线程
                             # 中制造不受控内存占用。
                             for body_candidate in candidates_from_response_text(
                                 response.url,
                                 content_type,
-                                body_text[:1_000_000],
+                                body_text[:MAX_RESPONSE_TEXT_BYTES],
                             ):
                                 candidates.append(body_candidate)
                                 self.log(
@@ -365,16 +428,15 @@ class PageSniffer:
                         f"[*] 可视化嗅探等待 {self.options.manual_wait_seconds} 秒；"
                         "请在浏览器中完成允许的人工操作并点击播放。"
                     )
-                waited = 0.0
-                # 每秒轮询而非固定 sleep，可在真实网络候选出现后立即收尾。
-                while should_continue_waiting_for_media(
-                    candidate_count=1 if has_reliable_media_candidate(candidates) else 0,
-                    elapsed_seconds=waited,
-                    limit_seconds=self.options.manual_wait_seconds,
-                    visible=self.options.visible,
-                ):
-                    page.wait_for_timeout(1000)
-                    waited += 1.0
+                deadline = time.monotonic() + self.options.manual_wait_seconds
+                # 使用真实截止时间，把同步响应回调的耗时也计入观察预算。
+                while not has_reliable_media_candidate(candidates):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    page.wait_for_timeout(
+                        max(1, min(1000, int(remaining * 1000)))
+                    )
 
                 normalized = deduplicate_media_candidates(candidates)
                 counts: dict[str, int] = {}
@@ -395,51 +457,60 @@ class PageSniffer:
                     )
 
             page.on("response", handle_response)
+            main_response = None
             try:
                 if self.options.visible:
                     self.log(
                         "[*] 已启用可视化嗅探；如页面需要人工验证，"
                         "请在弹出的浏览器中完成后点击播放。"
                     )
-                main_response = page.goto(
-                    page_url,
-                    wait_until="domcontentloaded",
-                    timeout=25000,
-                )
-                access_snapshot = PageAccessSnapshot(
-                    status_code=main_response.status if main_response else None,
-                    title=page.title(),
-                    final_url=page.url,
-                    video_count=page.locator("video").count(),
-                    iframe_count=page.locator("iframe").count(),
-                )
-                self.log(
-                    "[*] 页面诊断: "
-                    f"状态码={access_snapshot.status_code}, "
-                    f"标题={access_snapshot.title or '未知'}, "
-                    f"video={access_snapshot.video_count}, "
-                    f"iframe={access_snapshot.iframe_count}"
-                )
-                access_error = detect_access_limited_page(access_snapshot)
-                if access_error:
-                    raise access_error
-                self.log("[*] 正在尝试模拟点击播放器以触发真实数据流...")
+
                 try:
-                    page.locator("video").first.click(timeout=3000)
-                    wait_for_candidates()
-                except Exception:
-                    # 部分站点把播放器放在 iframe 或 canvas 中，无法直接定位
-                    # video 元素；点击视口中心是保守的通用触发手段。
-                    try:
-                        viewport = page.viewport_size or {"width": 1280, "height": 720}
-                        page.mouse.click(viewport["width"] / 2, viewport["height"] / 2)
-                        wait_for_candidates()
-                    except Exception:
-                        pass
-            except VideoDownloadError:
-                raise
-            except Exception as exc:
-                warnings.append(f"页面加载异常或超时: {exc}")
+                    main_response = page.goto(
+                        page_url,
+                        wait_until="domcontentloaded",
+                        timeout=25000,
+                    )
+                except Exception as exc:
+                    navigation_incomplete = True
+                    safe_error = redact_for_display(str(exc))
+                    warning = f"页面加载异常或超时: {safe_error}"
+                    warnings.append(warning)
+                    self.log(f"[!] {warning}；继续观察媒体请求。")
+
+                try:
+                    access_snapshot = PageAccessSnapshot(
+                        status_code=(
+                            main_response.status if main_response else None
+                        ),
+                        title=page.title(),
+                        final_url=page.url,
+                        video_count=page.locator("video").count(),
+                        iframe_count=page.locator("iframe").count(),
+                    )
+                    self.log(
+                        "[*] 页面诊断: "
+                        f"状态码={access_snapshot.status_code}, "
+                        f"标题={access_snapshot.title or '未知'}, "
+                        f"video={access_snapshot.video_count}, "
+                        f"iframe={access_snapshot.iframe_count}"
+                    )
+                    access_error = detect_access_limited_page(access_snapshot)
+                    if access_error:
+                        raise access_error
+                except VideoDownloadError:
+                    raise
+                except Exception as exc:
+                    navigation_incomplete = True
+                    safe_error = redact_for_display(str(exc))
+                    warning = f"页面诊断异常: {safe_error}"
+                    warnings.append(warning)
+                    self.log(f"[!] {warning}；继续观察媒体请求。")
+
+                self.log("[*] 正在尝试触发播放器以产生真实数据流...")
+                trigger_result = trigger_playback(page)
+                self.log(f"[*] 播放器触发方式: {trigger_result}")
+                wait_for_candidates()
             finally:
                 # 必须在 context/page 关闭前提取 Cookie、LocalStorage 和 UA；
                 # 下载适配器随后使用这些数据访问要求同一会话的 CDN。
@@ -472,5 +543,6 @@ class PageSniffer:
             source_url=page_url,
             candidates=deduplicate_media_candidates(candidates),
             session=session,
+            navigation_incomplete=navigation_incomplete,
             warnings=warnings,
         )

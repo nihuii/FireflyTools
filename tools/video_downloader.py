@@ -155,7 +155,7 @@ class VideoDownloaderTool(QWidget):
         self.sniff_options_layout.addWidget(QLabel("等待:"))
         self.sniff_wait_spin = QSpinBox()
         self.sniff_wait_spin.setRange(5, 180)
-        self.sniff_wait_spin.setValue(10)
+        self.sniff_wait_spin.setValue(25)
         self.sniff_wait_spin.setSuffix(" 秒等待")
         self.sniff_wait_spin.setFixedWidth(120)
         self.sniff_options_layout.addWidget(self.sniff_wait_spin)
@@ -328,7 +328,7 @@ class VideoDownloaderTool(QWidget):
                     "sniffer_use_persistent_profile",
                     False,
                 ),
-                manual_wait_seconds=task.get("sniffer_manual_wait_seconds", 10),
+                manual_wait_seconds=task.get("sniffer_manual_wait_seconds", 25),
             )
             spider = self.spider_factory(
                 output_dir=task["save_dir"],

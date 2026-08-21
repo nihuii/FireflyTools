@@ -31,6 +31,21 @@ class VideoCrawlerErrorTests(unittest.TestCase):
 
 
 class VideoCrawlerModelTests(unittest.TestCase):
+    def test_diagnostic_report_navigation_is_complete_by_default(self):
+        report = DiagnosticReport(source_url="https://site.example/watch")
+
+        self.assertFalse(report.navigation_incomplete)
+
+    def test_diagnostic_report_can_mark_navigation_incomplete(self):
+        report = DiagnosticReport(
+            source_url="https://site.example/watch",
+            navigation_incomplete=True,
+            warnings=["页面导航超时"],
+        )
+
+        self.assertTrue(report.navigation_incomplete)
+        self.assertEqual(report.warnings, ["页面导航超时"])
+
     def test_diagnostic_report_summarizes_candidates(self):
         report = DiagnosticReport(
             source_url="https://example.test/watch",
