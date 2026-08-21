@@ -352,11 +352,19 @@ class HlsAdapter:
             "manifest_filename": None,
         }
 
-    async def download_segments(self, session, download_items, cipher):
+    async def download_segments(
+        self,
+        session,
+        download_items,
+        cipher,
+        *,
+        total_segment_count=None,
+    ):
         """使用信号量限制并发，下载分片并持续更新续传清单。
 
         所有协程可一次创建，但只有获得 semaphore 的任务会发起网络请求。
         下载全部结束后才按原顺序更新 manifest，避免并发写同一个 JSON。
+        续传场景由调用方传入完整切片数，避免用本轮待下载数放大失败率。
         """
         semaphore = asyncio.Semaphore(self.segment_concurrency)
         normalized_items = [
@@ -394,7 +402,12 @@ class HlsAdapter:
                 # 可能导致 PermissionError，这是已知但尚未加固的恢复风险。
                 manifest.save()
         failed_count = results.count(False)
-        self._validate_segment_failures(failed_count, len(results))
+        failure_rate_total = (
+            total_segment_count
+            if total_segment_count is not None
+            else len(results)
+        )
+        self._validate_segment_failures(failed_count, failure_rate_total)
 
     def build_segment_cipher(self, key, media_sequence):
         """读取 HLS 密钥并按分片序号创建 AES-CBC 解密器。"""
@@ -748,7 +761,12 @@ class HlsAdapter:
 
             async with aiohttp.ClientSession(headers=self.headers, trust_env=True) as session:
                 self.log(f"[*] 当前并发数限制设为: {self.segment_concurrency}")
-                await self.download_segments(session, download_items, None)
+                await self.download_segments(
+                    session,
+                    download_items,
+                    None,
+                    total_segment_count=len(ts_files_list),
+                )
 
             self.log("[+] 切片处理完成，开始执行合并与转码...")
             final_mp4_path = os.path.join(self.output_dir, f"{output_filename}.mp4")

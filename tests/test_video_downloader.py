@@ -860,6 +860,51 @@ class UniversalVideoSpiderTests(unittest.TestCase):
             self.assertTrue(os.path.exists(output_path))
             self.assertFalse(os.path.exists(video_temp_dir))
 
+    def test_m3u8_resume_failure_rate_uses_full_playlist_count(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TEMP_ROOT) as temp_dir:
+            failed_urls = {
+                "https://cdn.example.test/00096.ts",
+                "https://cdn.example.test/00097.ts",
+            }
+            spider = ResumeRecordingSpider(
+                output_dir=temp_dir,
+                temp_dir=temp_dir,
+                fail_urls=failed_urls,
+            )
+            video_temp_dir = os.path.join(temp_dir, "resume-rate")
+            os.makedirs(video_temp_dir)
+
+            from tools.video_crawler.resume import SegmentManifest
+
+            manifest = SegmentManifest(
+                os.path.join(video_temp_dir, ".firefly-segments.json")
+            )
+            for index in range(96):
+                filename = f"{index:05d}.ts"
+                path = os.path.join(video_temp_dir, filename)
+                with open(path, "wb") as segment_file:
+                    segment_file.write(b"cached")
+                manifest.mark_downloaded(
+                    filename,
+                    url=f"https://cdn.example.test/{filename}",
+                    size=os.path.getsize(path),
+                )
+            manifest.save()
+
+            with patch(
+                "tools.video_crawler.adapters.hls.m3u8.load",
+                return_value=fake_playlist(100),
+            ):
+                output_path = asyncio.run(
+                    spider._download_m3u8(
+                        "https://cdn.example.test/index.m3u8",
+                        "resume-rate",
+                    )
+                )
+
+            self.assertEqual(len(spider.download_calls), 4)
+            self.assertTrue(os.path.exists(output_path))
+
     def test_m3u8_failure_preserves_manifest_and_downloaded_segments(self):
         with tempfile.TemporaryDirectory(dir=TEST_TEMP_ROOT) as temp_dir:
             spider = ResumeRecordingSpider(
