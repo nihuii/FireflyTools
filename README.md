@@ -128,7 +128,7 @@ FireflyTools/
 └─ README.md
 ```
 
-进一步了解当前架构，请阅读 `docs/project-overview.md`；历史实施计划统一归档在 `docs/plans/`。
+进一步了解当前架构，请阅读 `docs/项目介绍.md`；历史实施计划统一归档在 `docs/plans/`。
 
 运行测试：
 
