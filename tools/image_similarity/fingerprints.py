@@ -81,6 +81,12 @@ def _build_fingerprint(path: Path, order: int) -> ImageFingerprint:
     canonical_path = path.resolve(strict=True)
 
     with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"Corrupt EXIF data\..*",
+            category=UserWarning,
+            module=r"PIL\.TiffImagePlugin",
+        )
         warnings.simplefilter("error", Image.DecompressionBombWarning)
         with Image.open(path) as opened:
             image_format = (opened.format or path.suffix.lstrip(".") or "UNKNOWN").upper()

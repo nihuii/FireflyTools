@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 import tempfile
 import unittest
+import warnings
 
 from PIL import Image, ImageDraw
 
@@ -109,6 +110,30 @@ class ImageSimilarityFingerprintTests(unittest.TestCase):
         self.assertEqual(oriented.record.dimensions, rotated.record.dimensions)
         self.assertLessEqual(hamming_distance(oriented.phash, rotated.phash), 4)
         self.assertLessEqual(hamming_distance(oriented.dhash, rotated.dhash), 4)
+
+    def test_recoverable_corrupt_exif_warning_is_not_emitted(self):
+        """可正常解码的截断 EXIF 不应在扫描时反复污染控制台。"""
+        clean_path = self.root / "clean.jpg"
+        corrupt_path = self.root / "corrupt-exif.jpg"
+        self._pattern_image().save(clean_path, quality=95)
+        jpeg_bytes = clean_path.read_bytes()
+        exif_payload = b"Exif\x00\x00II*\x00\x08\x00\x00\x00\x00\x00"
+        app1_segment = (
+            b"\xff\xe1"
+            + (len(exif_payload) + 2).to_bytes(2, "big")
+            + exif_payload
+        )
+        corrupt_path.write_bytes(jpeg_bytes[:2] + app1_segment + jpeg_bytes[2:])
+
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always")
+            fingerprint = fingerprint_image(corrupt_path, order=0)
+
+        self.assertEqual((96, 64), fingerprint.record.dimensions)
+        self.assertFalse(
+            any("Corrupt EXIF data" in str(item.message) for item in captured),
+            captured,
+        )
 
     def test_grayscale_similarity_uses_normalized_mean_difference(self):
         """灰度复核严格采用设计文档定义的归一化平均差。"""

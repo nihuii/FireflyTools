@@ -1251,9 +1251,12 @@ class ImageSimilarityTool(QWidget):
             return None
         return self.image_model._member(index.row())
 
-    def open_current_image(self, index: QModelIndex | None = None) -> None:
+    def open_current_image(
+        self,
+        index: QModelIndex | bool | None = None,
+    ) -> None:
         """使用系统默认查看器打开当前图片。"""
-        if index is not None and index.isValid():
+        if isinstance(index, QModelIndex) and index.isValid():
             self.image_view.setCurrentIndex(index)
         fingerprint = self._current_fingerprint()
         if fingerprint is not None:

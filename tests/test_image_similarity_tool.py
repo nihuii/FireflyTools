@@ -163,6 +163,29 @@ class ImageSimilarityToolTests(unittest.TestCase):
         self.assertFalse(self.tool.trash_button.isEnabled())
         self.assertEqual(Qt.CheckState.Unchecked, self.tool.image_model.check_state(0))
 
+    def test_open_image_button_opens_current_image_without_slot_error(self):
+        """按钮携带的 checked 布尔值不能被误当作表格索引。"""
+        result = self._scan_result()
+        self.tool.show_scan_result(result)
+        current = self.tool.image_model.index(0, 0)
+        self.tool.image_view.setCurrentIndex(current)
+        unhandled = []
+
+        with (
+            mock.patch(
+                "sys.excepthook",
+                side_effect=lambda kind, value, tb: unhandled.append(value),
+            ),
+            mock.patch(
+                "tools.image_similarity_tool.QDesktopServices.openUrl",
+                return_value=True,
+            ) as open_url,
+        ):
+            self.tool.open_image_button.click()
+
+        self.assertEqual([], unhandled)
+        open_url.assert_called_once()
+
     def test_select_group_others_keeps_suggested_item_unselected(self):
         """用户主动点击组内快捷选择时仍保留系统建议项。"""
         result = self._scan_result()
