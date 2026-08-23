@@ -114,6 +114,13 @@ def get_global_stylesheet(image_path):
             color: {text_color};
             background: transparent;
         }}
+        QDialog#trashConfirmationDialog {{
+            background-color: {dialog_bg};
+        }}
+        QDialog#trashConfirmationDialog QLabel {{
+            color: {text_color};
+            background: transparent;
+        }}
         QLabel, QCheckBox, QRadioButton {{ color: {text_color}; font-weight: bold; font-size: 13px; background: transparent; }}
         QLineEdit, QSpinBox, QTextEdit, QListWidget {{
             background-color: {input_bg};
@@ -123,6 +130,65 @@ def get_global_stylesheet(image_path):
             color: {text_color};
             selection-background-color: {btn_bg};
         }}
+        QComboBox, QPlainTextEdit {{
+            background-color: {input_bg};
+            border: 1px solid {border_color};
+            border-radius: 8px;
+            padding: 6px;
+            color: {text_color};
+            selection-background-color: {btn_bg};
+        }}
+        QComboBox::drop-down {{ border: none; width: 24px; }}
+        QComboBox QAbstractItemView {{
+            background-color: {dialog_bg};
+            color: {text_color};
+            border: 1px solid {border_color};
+            selection-background-color: {btn_bg};
+        }}
+
+        QTreeView, QListView, QTableView {{
+            background-color: {input_bg};
+            color: {text_color};
+            border: 1px solid {border_color};
+            border-radius: 8px;
+            alternate-background-color: {panel_bg};
+            selection-background-color: {btn_bg};
+            selection-color: {btn_text};
+            outline: none;
+        }}
+        QTreeView::item, QListView::item, QTableView::item {{
+            padding: 5px;
+            border-bottom: 1px solid {border_color};
+        }}
+        QTreeView::item:hover, QListView::item:hover, QTableView::item:hover {{
+            background-color: {nav_hover};
+        }}
+        QTreeView::item:selected, QListView::item:selected, QTableView::item:selected {{
+            background-color: {btn_bg};
+            color: {btn_text};
+        }}
+        QHeaderView::section {{
+            background-color: {panel_bg};
+            color: {text_color};
+            border: none;
+            border-right: 1px solid {border_color};
+            border-bottom: 1px solid {border_color};
+            padding: 7px;
+            font-weight: bold;
+        }}
+        QProgressBar {{
+            background-color: {input_bg};
+            color: {text_color};
+            border: 1px solid {border_color};
+            border-radius: 7px;
+            text-align: center;
+            min-height: 16px;
+        }}
+        QProgressBar::chunk {{
+            background-color: {btn_bg};
+            border-radius: 6px;
+        }}
+        QSplitter::handle {{ background-color: {border_color}; }}
         QPushButton {{
             background-color: {btn_bg};
             color: {btn_text};

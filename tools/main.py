@@ -4,7 +4,7 @@ import sys
 import os
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QTabWidget, QVBoxLayout,
                              QHBoxLayout, QWidget, QLabel, QPushButton, QSizeGrip)
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QFont, QPainter, QPixmap, QPainterPath, QColor
 
 # 导入工具模块
@@ -12,6 +12,7 @@ from tools.video_downloader import VideoDownloaderTool
 from tools.video_extractor import VideoExtractorTool
 from tools.keyword_organizer import KeywordOrganizerTool
 from tools.image_resizer import SmartImageResizerTool
+from tools.image_similarity_tool import ImageSimilarityTool
 from tools.theme_utils import get_global_stylesheet
 
 
@@ -123,11 +124,12 @@ class CustomTitleBar(QWidget):
 
 
 class MediaToolboxApp(QMainWindow):
-    """组装四个媒体工具标签页并管理全局壁纸与窗口尺寸。"""
+    """组装五个媒体工具标签页并管理全局壁纸与窗口尺寸。"""
     def __init__(self):
-        """组装无边框主窗口、四个工具页、缩放手柄和壁纸系统。"""
+        """组装无边框主窗口、五个工具页、缩放手柄和壁纸系统。"""
         super().__init__()
         self.resize(850, 700)
+        self._close_pending = False
 
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -155,6 +157,11 @@ class MediaToolboxApp(QMainWindow):
         self.notebook.addTab(VideoExtractorTool(), "视频子目录提取")
         self.notebook.addTab(KeywordOrganizerTool(), "关键字归档")
         self.notebook.addTab(SmartImageResizerTool(), "图片智能裁剪")
+        self.image_similarity_tool = ImageSimilarityTool()
+        self.image_similarity_tool.workers_idle.connect(
+            self._resume_pending_close
+        )
+        self.notebook.addTab(self.image_similarity_tool, "图片相似度检测")
 
         # 初始化壁纸系统
         self.wallpapers = []
@@ -189,6 +196,10 @@ class MediaToolboxApp(QMainWindow):
             # 全局下发带智能色彩提取的 QSS 样式表
             self.setStyleSheet(get_global_stylesheet(img_path))
             self.main_wrapper.update()  # 强制刷新背景绘制
+        else:
+            self.main_wrapper.bg_pixmap = None
+            self.setStyleSheet(get_global_stylesheet(""))
+            self.main_wrapper.update()
 
     def resizeEvent(self, event):
         """窗口尺寸变化后重新定位右下角缩放手柄。"""
@@ -205,6 +216,24 @@ class MediaToolboxApp(QMainWindow):
                 grip_size.width(),
                 grip_size.height(),
             )
+
+    def closeEvent(self, event):
+        """等待图片扫描或回收任务安全结束后再真正销毁主窗口。"""
+        if self.image_similarity_tool.has_active_workers():
+            self._close_pending = True
+            self.image_similarity_tool.request_shutdown()
+            event.ignore()
+            return
+        self._close_pending = False
+        super().closeEvent(event)
+
+    def _resume_pending_close(self):
+        """后台任务全部空闲后重新投递此前被忽略的主窗口关闭请求。"""
+        if (
+            self._close_pending
+            and not self.image_similarity_tool.has_active_workers()
+        ):
+            QTimer.singleShot(0, self.close)
 
 
 if __name__ == "__main__":

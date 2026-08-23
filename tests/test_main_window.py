@@ -1,10 +1,17 @@
 import os
+from pathlib import Path
+import threading
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QCloseEvent, QImage
+from PyQt6.QtTest import QSignalSpy
 from PyQt6.QtWidgets import QApplication, QSizeGrip
 
+from tools.image_similarity_tool import ImageSimilarityTool
 from tools.main import MediaToolboxApp
 
 
@@ -26,6 +33,77 @@ class MediaToolboxAppTests(unittest.TestCase):
             self.window.minimumSize(),
             self.window.maximumSize(),
         )
+
+    def test_main_window_contains_image_similarity_tab(self):
+        """主窗口把图片相似度检测注册为第 5 个工具页。"""
+        self.assertEqual(5, self.window.notebook.count())
+        self.assertEqual("图片相似度检测", self.window.notebook.tabText(4))
+        self.assertIsInstance(self.window.notebook.widget(4), ImageSimilarityTool)
+
+    def test_close_waits_for_active_scan_and_requests_cancellation(self):
+        """扫描仍在运行时主窗口必须忽略关闭并发出协作取消请求。"""
+        tool = self.window.notebook.widget(4)
+        fake_worker = mock.Mock()
+        tool.scan_worker = fake_worker
+        tool.scan_thread = object()
+        event = QCloseEvent()
+
+        try:
+            self.window.closeEvent(event)
+
+            self.assertFalse(event.isAccepted())
+            self.assertTrue(self.window._close_pending)
+            fake_worker.cancel.assert_called_once_with()
+        finally:
+            tool.scan_worker = None
+            tool.scan_thread = None
+
+    def test_pending_close_resumes_only_after_recycle_worker_is_idle(self):
+        """不可强制终止的回收任务结束后，主窗口才继续原关闭请求。"""
+        tool = self.window.notebook.widget(4)
+        tool.recycle_thread = object()
+        event = QCloseEvent()
+
+        self.window.closeEvent(event)
+
+        self.assertFalse(event.isAccepted())
+        self.assertTrue(self.window._close_pending)
+
+        tool.recycle_thread = None
+        tool.recycle_worker = None
+        tool._notify_workers_idle()
+        self.app.processEvents()
+
+        self.assertFalse(self.window._close_pending)
+
+    def test_close_waits_for_running_thumbnail_decode(self):
+        """主窗口关闭时应撤销缩略图队列并等待正在解码的任务退出。"""
+        tool = self.window.image_similarity_tool
+        release = threading.Event()
+        started = threading.Event()
+
+        def blocking_decoder(_path, _size):
+            """模拟无法在函数中途强制终止的图片解码调用。"""
+            started.set()
+            release.wait(3)
+            image = QImage(8, 8, QImage.Format.Format_RGB32)
+            image.fill(Qt.GlobalColor.red)
+            return image
+
+        tool.thumbnail_cache.decoder = blocking_decoder
+        idle = QSignalSpy(tool.workers_idle)
+        tool.thumbnail_cache.get(Path("thumbnail-close-test.png"))
+        self.assertTrue(started.wait(1))
+        event = QCloseEvent()
+
+        self.window.closeEvent(event)
+
+        self.assertFalse(event.isAccepted())
+        self.assertTrue(self.window._close_pending)
+        release.set()
+        self.assertTrue(idle.wait(3000))
+        self.app.processEvents()
+        self.assertFalse(self.window._close_pending)
 
 
 if __name__ == "__main__":
