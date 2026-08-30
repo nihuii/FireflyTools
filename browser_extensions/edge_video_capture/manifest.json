@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "FireflyTools Edge 视频捕获",
+  "version": "0.1.0",
+  "description": "在用户授权的当前 Edge 标签页中观察媒体请求并发送给本机 FireflyTools。",
+  "minimum_chrome_version": "102",
+  "incognito": "not_allowed",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsbFUu9s0WkJ5Y2jA03jaUT0lIR2II3dQ6w8Y52XB16224XEmVtzC7T28M8SbptzXNPSCVgeDGBo5FTukrB172AG/5PyaiVK0BLAykUA6xtgYfC+NYBl6IVeRQtWALTpYZbhsFmPlROCG9MzgAWSyAgyEdZTOV8N1fOK/iQYCoiBr7GBFzIejsoEs3IT4KU6DvhM6yTS8mtGYxtEl/KXdtJvtBreooVT8uFj6s+xXln9imEf8N3zZ9kl2IGklmleQozYgRbOOPsVbyv9UI5yqlYu5oVueQT+6l2pS+wn2r7uSaxKavAo2Z/gJ6fhyyuYUUF0JpFRtBrQLnIeKyKN7tQIDAQAB",
+  "permissions": ["activeTab", "alarms", "clipboardWrite", "nativeMessaging", "storage", "webRequest"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "background": {"service_worker": "service_worker.js"},
+  "action": {"default_popup": "popup.html", "default_title": "FireflyTools Edge 视频捕获"}
+}

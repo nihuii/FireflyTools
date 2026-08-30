@@ -1,0 +1,6 @@
+{
+  "name": "fireflytools-edge-video-capture",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {"test": "node --test tests/candidate_detector.test.js tests/capture_store.test.js"}
+}
