@@ -1,8 +1,12 @@
 """定义媒体候选、浏览器会话、页面诊断和嗅探配置数据模型。"""
 
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
+
+
+EDGE_CAPTURE_TTL_SECONDS = 300
 
 
 class MediaKind(str, Enum):
@@ -63,6 +67,48 @@ class BrowserSessionSnapshot:
     headers: dict[str, str] = field(default_factory=dict)  #: 当没有传入值时，自动创建一个新的默认对象。
     #: 页面 LocalStorage 快照，仅供诊断或后续扩展，不会自动转换成请求头。
     local_storage: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class EdgeCaptureCandidate:
+    """Describe a media request captured by the Edge companion."""
+
+    request_id: str
+    captured_at: datetime
+    page_url: str
+    page_title: str
+    media_url: str
+    kind: MediaKind
+    content_type: str
+    method: str
+    headers: dict[str, str] = field(default_factory=dict)
+    protocol_version: int = 1
+
+    @property
+    def expires_at(self) -> datetime:
+        """Return the UTC instant after which the capture is stale."""
+        return self.captured_at + timedelta(seconds=EDGE_CAPTURE_TTL_SECONDS)
+
+    def is_expired(self, now: datetime | None = None) -> bool:
+        """Return whether the capture has reached its expiry instant."""
+        current = now or datetime.now(timezone.utc)
+        return current >= self.expires_at
+
+    def to_session_snapshot(self) -> BrowserSessionSnapshot:
+        """Build a cookie-free downloader session from safe headers."""
+        lowered = {name.lower(): value for name, value in self.headers.items()}
+        return BrowserSessionSnapshot(
+            user_agent=lowered.get("user-agent", ""),
+            referer=lowered.get("referer", self.page_url),
+            origin=lowered.get("origin", ""),
+            cookies=(),
+            headers={
+                name: value
+                for name, value in self.headers.items()
+                if name.lower() in {"accept", "accept-language", "range"}
+            },
+            local_storage={},
+        )
 
 
 @dataclass(frozen=True)

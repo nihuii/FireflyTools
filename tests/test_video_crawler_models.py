@@ -1,9 +1,11 @@
+from datetime import datetime, timezone
 import unittest
 
 from tools.video_crawler.errors import VideoDownloadError, VideoErrorCode
 from tools.video_crawler.models import (
     BrowserSessionSnapshot,
     DiagnosticReport,
+    EdgeCaptureCandidate,
     MediaCandidate,
     MediaKind,
 )
@@ -29,8 +31,48 @@ class VideoCrawlerErrorTests(unittest.TestCase):
         self.assertEqual(error.code, VideoErrorCode.UNKNOWN)
         self.assertEqual(str(error), "嗅探失败，未能找到视频流")
 
+    def test_edge_candidate_error_codes_are_stable(self):
+        self.assertEqual(
+            VideoErrorCode.EDGE_CANDIDATE_INVALID.value,
+            "EDGE_CANDIDATE_INVALID",
+        )
+        self.assertEqual(
+            VideoErrorCode.EDGE_CANDIDATE_EXPIRED.value,
+            "EDGE_CANDIDATE_EXPIRED",
+        )
+
 
 class VideoCrawlerModelTests(unittest.TestCase):
+    def test_edge_capture_candidate_builds_safe_session_snapshot(self):
+        candidate = EdgeCaptureCandidate(
+            request_id="request-1",
+            captured_at=datetime(2026, 8, 30, 12, tzinfo=timezone.utc),
+            page_url="https://example.test/watch/1",
+            page_title="Example",
+            media_url="https://cdn.example.test/master.m3u8",
+            kind=MediaKind.HLS,
+            content_type="application/vnd.apple.mpegurl",
+            method="GET",
+            headers={
+                "Referer": "https://example.test/",
+                "Origin": "https://example.test",
+                "User-Agent": "Edge UA",
+                "Accept-Language": "zh-CN",
+            },
+        )
+
+        snapshot = candidate.to_session_snapshot()
+
+        self.assertEqual(snapshot.user_agent, "Edge UA")
+        self.assertEqual(snapshot.referer, "https://example.test/")
+        self.assertEqual(snapshot.origin, "https://example.test")
+        self.assertEqual(snapshot.cookies, ())
+        self.assertEqual(snapshot.headers, {"Accept-Language": "zh-CN"})
+        self.assertEqual(
+            candidate.expires_at,
+            datetime(2026, 8, 30, 12, 5, tzinfo=timezone.utc),
+        )
+
     def test_diagnostic_report_navigation_is_complete_by_default(self):
         report = DiagnosticReport(source_url="https://site.example/watch")
 
