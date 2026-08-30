@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import unittest
 
 from tools.video_crawler.errors import VideoDownloadError, VideoErrorCode
@@ -72,6 +72,66 @@ class VideoCrawlerModelTests(unittest.TestCase):
             candidate.expires_at,
             datetime(2026, 8, 30, 12, 5, tzinfo=timezone.utc),
         )
+
+    def test_edge_capture_candidate_rejects_excessive_future_clock_skew(self):
+        now = datetime(2026, 8, 30, 12, tzinfo=timezone.utc)
+        candidate_fields = {
+            "request_id": "request-1",
+            "page_url": "https://example.test/watch/1",
+            "page_title": "Example",
+            "media_url": "https://cdn.example.test/master.m3u8",
+            "kind": MediaKind.HLS,
+            "content_type": "application/vnd.apple.mpegurl",
+            "method": "GET",
+        }
+
+        within_skew = EdgeCaptureCandidate(
+            captured_at=now + timedelta(seconds=30),
+            **candidate_fields,
+        )
+        beyond_skew = EdgeCaptureCandidate(
+            captured_at=now + timedelta(seconds=31),
+            **candidate_fields,
+        )
+
+        self.assertFalse(within_skew.is_expired(now))
+        self.assertTrue(beyond_skew.is_expired(now))
+
+    def test_edge_capture_candidate_headers_are_read_only(self):
+        candidate = EdgeCaptureCandidate(
+            request_id="request-1",
+            captured_at=datetime(2026, 8, 30, 12, tzinfo=timezone.utc),
+            page_url="https://example.test/watch/1",
+            page_title="Example",
+            media_url="https://cdn.example.test/master.m3u8",
+            kind=MediaKind.HLS,
+            content_type="application/vnd.apple.mpegurl",
+            method="GET",
+            headers={"Accept-Language": "zh-CN"},
+        )
+
+        with self.assertRaises(TypeError):
+            candidate.headers["Accept-Language"] = "en-US"
+
+    def test_edge_capture_candidate_copies_headers_and_snapshot_is_independent(self):
+        input_headers = {"Accept-Language": "zh-CN"}
+        candidate = EdgeCaptureCandidate(
+            request_id="request-1",
+            captured_at=datetime(2026, 8, 30, 12, tzinfo=timezone.utc),
+            page_url="https://example.test/watch/1",
+            page_title="Example",
+            media_url="https://cdn.example.test/master.m3u8",
+            kind=MediaKind.HLS,
+            content_type="application/vnd.apple.mpegurl",
+            method="GET",
+            headers=input_headers,
+        )
+
+        input_headers["Accept-Language"] = "en-US"
+        snapshot = candidate.to_session_snapshot()
+        snapshot.headers["Accept-Language"] = "ja-JP"
+
+        self.assertEqual(candidate.headers["Accept-Language"], "zh-CN")
 
     def test_diagnostic_report_navigation_is_complete_by_default(self):
         report = DiagnosticReport(source_url="https://site.example/watch")

@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 import json
+import sys
 import unittest
 
 from tests.edge_companion_fixtures import valid_edge_message
@@ -53,6 +54,33 @@ class EdgeCompanionProtocolTests(unittest.TestCase):
 
         self.assertEqual(caught.exception.code, "INVALID_URL")
 
+    def test_rejects_control_characters_in_page_url(self):
+        for label, suffix in (
+            ("nul", "\x00"),
+            ("crlf", "\r\nX-Evil: 1"),
+            ("unit separator", "\x1f"),
+            ("del", "\x7f"),
+        ):
+            message = valid_edge_message()
+            message["page"]["url"] += suffix
+            with self.subTest(label=label):
+                with self.assertRaises(EdgeProtocolError) as caught:
+                    parse_candidate_json(json.dumps(message))
+                self.assertEqual(caught.exception.code, "INVALID_URL")
+
+    def test_rejects_empty_hostname_and_invalid_ports(self):
+        for url in (
+            "http://:80/watch",
+            "http://example.test:bad/watch",
+            "http://example.test:65536/watch",
+        ):
+            message = valid_edge_message()
+            message["candidate"]["url"] = url
+            with self.subTest(url=url):
+                with self.assertRaises(EdgeProtocolError) as caught:
+                    parse_candidate_json(json.dumps(message))
+                self.assertEqual(caught.exception.code, "INVALID_URL")
+
     def test_task_payload_is_revalidated_and_expiry_is_reported(self):
         candidate = parse_candidate_json(json.dumps(valid_edge_message()))
         task_payload = serialize_candidate(candidate)
@@ -63,6 +91,85 @@ class EdgeCompanionProtocolTests(unittest.TestCase):
         self.assertTrue(
             restored.is_expired(datetime(2026, 8, 30, 12, 5, 1, tzinfo=timezone.utc))
         )
+
+    def test_task_payload_rejects_tampered_critical_fields(self):
+        tampering_cases = (
+            (
+                "method",
+                lambda payload: payload["candidate"].__setitem__("method", "POST"),
+                "INVALID_METHOD",
+            ),
+            (
+                "cookie",
+                lambda payload: payload["candidate"].__setitem__(
+                    "headers", {"Cookie": "sid=secret"}
+                ),
+                "INVALID_HEADERS",
+            ),
+            (
+                "version",
+                lambda payload: payload.__setitem__("protocol_version", 2),
+                "INVALID_VERSION",
+            ),
+            (
+                "url",
+                lambda payload: payload["candidate"].__setitem__(
+                    "url", "blob:https://example.test/id"
+                ),
+                "INVALID_URL",
+            ),
+        )
+
+        for label, tamper, expected_code in tampering_cases:
+            candidate = parse_candidate_json(json.dumps(valid_edge_message()))
+            task_payload = serialize_candidate(candidate)
+            tamper(task_payload)
+            with self.subTest(label=label):
+                with self.assertRaises(EdgeProtocolError) as caught:
+                    candidate_from_task_payload(task_payload)
+                self.assertEqual(caught.exception.code, expected_code)
+
+    def test_rejects_timestamps_that_overflow_utc_or_capture_ttl(self):
+        for captured_at in (
+            "9999-12-31T23:59:59-23:59",
+            "9999-12-31T23:59:59Z",
+        ):
+            message = valid_edge_message()
+            message["captured_at"] = captured_at
+            with self.subTest(captured_at=captured_at):
+                with self.assertRaises(EdgeProtocolError) as caught:
+                    parse_candidate_json(json.dumps(message))
+                self.assertEqual(caught.exception.code, "INVALID_TIMESTAMP")
+
+    def test_wraps_deep_json_recursion_as_invalid_json(self):
+        depth = max(3000, sys.getrecursionlimit() * 3)
+        deeply_nested_json = "[" * depth + "0" + "]" * depth
+
+        with self.assertRaises(EdgeProtocolError) as caught:
+            parse_candidate_json(deeply_nested_json)
+
+        self.assertEqual(caught.exception.code, "INVALID_JSON")
+
+    def test_wraps_deep_task_mapping_recursion_as_invalid_message(self):
+        message = valid_edge_message()
+        deeply_nested = {}
+        cursor = deeply_nested
+        for _ in range(max(3000, sys.getrecursionlimit() * 3)):
+            child = {}
+            cursor["child"] = child
+            cursor = child
+        message["extra"] = deeply_nested
+
+        with self.assertRaises(EdgeProtocolError) as caught:
+            candidate_from_task_payload(message)
+
+        self.assertEqual(caught.exception.code, "INVALID_MESSAGE")
+
+    def test_wraps_unencodable_json_text_as_invalid_json(self):
+        with self.assertRaises(EdgeProtocolError) as caught:
+            parse_candidate_json('"\ud800"')
+
+        self.assertEqual(caught.exception.code, "INVALID_JSON")
 
     def test_rejects_invalid_message_field_shapes_and_limits(self):
         invalid_values = (

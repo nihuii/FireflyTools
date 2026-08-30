@@ -1,10 +1,14 @@
 """Validate and serialize the V1 Edge media-candidate protocol."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from urllib.parse import urlsplit
 
-from tools.video_crawler.models import EdgeCaptureCandidate, MediaKind
+from tools.video_crawler.models import (
+    EDGE_CAPTURE_TTL_SECONDS,
+    EdgeCaptureCandidate,
+    MediaKind,
+)
 
 
 PROTOCOL_VERSION = 1
@@ -43,11 +47,19 @@ def _require_http_url(value: object, field_name: str) -> str:
     """Return an HTTP(S) URL or reject the named field."""
     if not isinstance(value, str) or not value or len(value) > MAX_URL_CHARS:
         raise EdgeProtocolError("INVALID_URL", f"{field_name} 不是有效 URL")
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+        raise EdgeProtocolError("INVALID_URL", f"{field_name} 不是有效 URL")
     try:
         parsed = urlsplit(value)
+        hostname = parsed.hostname
+        _ = parsed.port
     except ValueError as exc:
         raise EdgeProtocolError("INVALID_URL", f"{field_name} 不是有效 URL") from exc
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or not hostname
+    ):
         raise EdgeProtocolError("INVALID_URL", f"{field_name} 只允许 HTTP(S)")
     return value
 
@@ -99,7 +111,12 @@ def _parse_captured_at(value: object) -> datetime:
         raise EdgeProtocolError("INVALID_TIMESTAMP", "captured_at 格式无效") from exc
     if captured_at.tzinfo is None or captured_at.utcoffset() is None:
         raise EdgeProtocolError("INVALID_TIMESTAMP", "captured_at 必须包含时区")
-    return captured_at.astimezone(timezone.utc)
+    try:
+        captured_at_utc = captured_at.astimezone(timezone.utc)
+        _ = captured_at_utc + timedelta(seconds=EDGE_CAPTURE_TTL_SECONDS)
+    except (OverflowError, ValueError) as exc:
+        raise EdgeProtocolError("INVALID_TIMESTAMP", "captured_at 超出有效范围") from exc
+    return captured_at_utc
 
 
 def _mapping_size(raw: dict) -> int:
@@ -108,7 +125,7 @@ def _mapping_size(raw: dict) -> int:
         encoded = json.dumps(raw, ensure_ascii=False, separators=(",", ":")).encode(
             "utf-8"
         )
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, RecursionError) as exc:
         raise EdgeProtocolError("INVALID_MESSAGE", "消息包含不可序列化字段") from exc
     return len(encoded)
 
@@ -195,7 +212,7 @@ def _candidate_to_mapping(candidate: EdgeCaptureCandidate) -> dict:
             "kind": _KIND_TO_PROTOCOL.get(candidate.kind),
             "content_type": candidate.content_type,
             "method": candidate.method,
-            "headers": candidate.headers,
+            "headers": dict(candidate.headers),
         },
         "sensitive_headers_included": False,
     }
@@ -205,11 +222,15 @@ def parse_candidate_json(raw_json: str) -> EdgeCaptureCandidate:
     """Parse and validate an untrusted V1 JSON message."""
     if not isinstance(raw_json, str):
         raise EdgeProtocolError("INVALID_JSON", "消息必须是 JSON 字符串")
-    if len(raw_json.encode("utf-8")) > MAX_MESSAGE_BYTES:
+    try:
+        message_bytes = raw_json.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise EdgeProtocolError("INVALID_JSON", "消息不是有效 UTF-8 文本") from exc
+    if len(message_bytes) > MAX_MESSAGE_BYTES:
         raise EdgeProtocolError("MESSAGE_TOO_LARGE", "消息超过大小限制")
     try:
         raw = json.loads(raw_json)
-    except (json.JSONDecodeError, TypeError) as exc:
+    except (json.JSONDecodeError, TypeError, RecursionError) as exc:
         raise EdgeProtocolError("INVALID_JSON", "消息不是有效 JSON") from exc
     return _parse_candidate_mapping(raw)
 

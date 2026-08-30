@@ -1,12 +1,15 @@
 """定义媒体候选、浏览器会话、页面诊断和嗅探配置数据模型。"""
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from types import MappingProxyType
 from typing import Any
 
 
 EDGE_CAPTURE_TTL_SECONDS = 300
+EDGE_CAPTURE_FUTURE_SKEW_SECONDS = 30
 
 
 class MediaKind(str, Enum):
@@ -81,8 +84,12 @@ class EdgeCaptureCandidate:
     kind: MediaKind
     content_type: str
     method: str
-    headers: dict[str, str] = field(default_factory=dict)
+    headers: Mapping[str, str] = field(default_factory=dict)
     protocol_version: int = 1
+
+    def __post_init__(self) -> None:
+        """Defensively copy headers into a read-only mapping."""
+        object.__setattr__(self, "headers", MappingProxyType(dict(self.headers)))
 
     @property
     def expires_at(self) -> datetime:
@@ -92,6 +99,9 @@ class EdgeCaptureCandidate:
     def is_expired(self, now: datetime | None = None) -> bool:
         """Return whether the capture has reached its expiry instant."""
         current = now or datetime.now(timezone.utc)
+        future_skew = self.captured_at - current
+        if future_skew > timedelta(seconds=EDGE_CAPTURE_FUTURE_SKEW_SECONDS):
+            return True
         return current >= self.expires_at
 
     def to_session_snapshot(self) -> BrowserSessionSnapshot:
