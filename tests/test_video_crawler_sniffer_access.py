@@ -47,17 +47,120 @@ class PageAccessDiagnosticsTests(unittest.TestCase):
 
         self.assertIsNone(detect_access_limited_page(snapshot))
 
+    def test_detects_normalized_security_verification_titles(self):
+        for title in (
+            "Just a moment...",
+            "Justamoment",
+            "Checking your browser",
+            "正在进行安全验证",
+        ):
+            with self.subTest(title=title):
+                error = detect_access_limited_page(
+                    PageAccessSnapshot(status_code=200, title=title)
+                )
+
+                self.assertIsNotNone(error)
+                self.assertEqual(error.code, VideoErrorCode.HTTP_FORBIDDEN)
+
 
 class PageSnifferAccessFlowTests(unittest.TestCase):
-    def test_sniff_raises_forbidden_when_main_page_is_access_limited(self):
+    def test_headless_sniff_raises_immediately_for_initial_403(self):
+        page = ChallengeTransitionPage(clears=False, emits_hls=False)
         with patch(
             "playwright.sync_api.sync_playwright",
-            return_value=FakePlaywrightManager(FakePlaywright()),
+            return_value=FakePlaywrightManager(FakePlaywright(page)),
         ):
             with self.assertRaises(VideoDownloadError) as raised:
-                PageSniffer().sniff("https://www.aowu.tv/w/example")
+                PageSniffer(
+                    options=SnifferOptions(headless=True)
+                ).sniff("https://www.aowu.tv/w/example")
 
         self.assertEqual(raised.exception.code, VideoErrorCode.HTTP_FORBIDDEN)
+        self.assertEqual(page.wait_calls, 0)
+
+    def test_visible_sniff_waits_for_challenge_then_captures_hls(self):
+        page = ChallengeTransitionPage()
+        logs = []
+        with patch(
+            "playwright.sync_api.sync_playwright",
+            return_value=FakePlaywrightManager(FakePlaywright(page)),
+        ):
+            with patch(
+                "tools.video_crawler.sniffer.time.monotonic",
+                return_value=100.0,
+            ):
+                report = PageSniffer(
+                    log_callback=logs.append,
+                    options=SnifferOptions(
+                        headless=False,
+                        manual_wait_seconds=10,
+                    ),
+                ).sniff("https://site.example/watch")
+
+        self.assertEqual(report.best_candidate.url, page.hls_url)
+        self.assertGreaterEqual(page.wait_calls, 2)
+        self.assertTrue(any("安全验证已通过" in message for message in logs))
+
+    def test_visible_sniff_tolerates_transient_snapshot_error_during_redirect(self):
+        page = ChallengeTransitionPage(transient_title_failures=1)
+        with patch(
+            "playwright.sync_api.sync_playwright",
+            return_value=FakePlaywrightManager(FakePlaywright(page)),
+        ):
+            with patch(
+                "tools.video_crawler.sniffer.time.monotonic",
+                return_value=100.0,
+            ):
+                report = PageSniffer(
+                    options=SnifferOptions(
+                        headless=False,
+                        manual_wait_seconds=10,
+                    )
+                ).sniff("https://site.example/watch")
+
+        self.assertEqual(report.best_candidate.url, page.hls_url)
+
+    def test_visible_sniff_returns_empty_report_after_challenge_clears(self):
+        page = ChallengeTransitionPage(clears=True, emits_hls=False)
+        monotonic_values = iter([100.0, 100.0, 100.4, 101.1])
+        with patch(
+            "playwright.sync_api.sync_playwright",
+            return_value=FakePlaywrightManager(FakePlaywright(page)),
+        ):
+            with patch(
+                "tools.video_crawler.sniffer.time.monotonic",
+                side_effect=lambda: next(monotonic_values),
+            ):
+                report = PageSniffer(
+                    options=SnifferOptions(
+                        headless=False,
+                        manual_wait_seconds=1,
+                    )
+                ).sniff("https://site.example/watch")
+
+        self.assertEqual(report.candidates, [])
+
+    def test_visible_sniff_raises_when_challenge_reaches_deadline(self):
+        page = ChallengeTransitionPage(clears=False, emits_hls=False)
+        monotonic_values = iter([100.0, 100.0, 100.4, 101.1])
+        with patch(
+            "playwright.sync_api.sync_playwright",
+            return_value=FakePlaywrightManager(FakePlaywright(page)),
+        ):
+            with patch(
+                "tools.video_crawler.sniffer.time.monotonic",
+                side_effect=lambda: next(monotonic_values),
+            ):
+                with self.assertRaises(VideoDownloadError) as raised:
+                    PageSniffer(
+                        options=SnifferOptions(
+                            headless=False,
+                            manual_wait_seconds=1,
+                        )
+                    ).sniff("https://site.example/watch")
+
+        self.assertEqual(raised.exception.code, VideoErrorCode.HTTP_FORBIDDEN)
+        self.assertGreater(page.wait_calls, 0)
 
     def test_sniff_waits_past_network_mp4_for_hls_and_deduplicates_candidates(self):
         page = SequencedMediaPage()
@@ -311,6 +414,60 @@ class FakePage:
         if "navigator.userAgent" in script:
             return "Fake UA"
         return None
+
+
+class ChallengeTransitionPage(FakePage):
+    url = "https://site.example/watch"
+
+    def __init__(
+        self,
+        clears=True,
+        emits_hls=True,
+        transient_title_failures=0,
+    ):
+        super().__init__()
+        self._title = "Just a moment..."
+        self._status = 403
+        self.clears = clears
+        self.emits_hls = emits_hls
+        self.wait_calls = 0
+        self.response_callback = None
+        self.hls_url = "https://cdn.example.test/main.m3u8"
+        self.title_calls = 0
+        self.transient_title_failures = transient_title_failures
+
+    def on(self, event_name, callback):
+        if event_name == "response":
+            self.response_callback = callback
+
+    def goto(self, page_url, **kwargs):
+        return FakeMainResponse(status=403)
+
+    def title(self):
+        self.title_calls += 1
+        if self.title_calls > 1 and self.transient_title_failures:
+            self.transient_title_failures -= 1
+            raise RuntimeError("execution context was destroyed")
+        return self._title
+
+    def locator(self, selector):
+        if self._status == 200:
+            return FakeMediaLocator()
+        return FakeLocator()
+
+    def wait_for_timeout(self, timeout):
+        self.wait_calls += 1
+        if self.clears and self.wait_calls == 1:
+            self._status = 200
+            self._title = "Regular Video Page"
+        elif self.emits_hls and self._status == 200 and self.wait_calls == 2:
+            self.response_callback(
+                FakeObservedResponse(
+                    self.hls_url,
+                    "application/vnd.apple.mpegurl",
+                    "media",
+                )
+            )
 
 
 class FakeMainResponse:

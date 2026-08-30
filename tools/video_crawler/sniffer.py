@@ -19,7 +19,16 @@ from tools.video_crawler.session import extract_download_request_headers
 
 
 AD_KEYWORDS = ("ad.", "/ad/", "adv", "blank", "preview", "v.admaster")
-ACCESS_LIMITED_TITLE_KEYWORDS = ("403", "访问受限", "access denied", "forbidden")
+ACCESS_LIMITED_TITLE_KEYWORDS = (
+    "403",
+    "访问受限",
+    "accessdenied",
+    "forbidden",
+    "justamoment",
+    "checkingyourbrowser",
+    "正在进行安全验证",
+    "安全验证",
+)
 TEXT_RESPONSE_TYPES = ("json", "javascript", "text/", "html")
 MAX_RESPONSE_TEXT_BYTES = 1_000_000
 MEDIA_URL_PATTERN = re.compile(
@@ -236,7 +245,11 @@ def detect_access_limited_page(
     snapshot: PageAccessSnapshot,
 ) -> VideoDownloadError | None:
     """依据状态码和页面标题识别访问受限并构造结构化异常。"""
-    title = snapshot.title.lower()
+    title = re.sub(
+        r"[^a-z0-9\u4e00-\u9fff]+",
+        "",
+        (snapshot.title or "").lower(),
+    )
     if snapshot.status_code == 403 or any(
         keyword in title for keyword in ACCESS_LIMITED_TITLE_KEYWORDS
     ):
@@ -341,7 +354,8 @@ class PageSniffer:
             包含去重前候选列表、浏览器会话和非致命警告的诊断报告。
 
         Raises:
-            VideoDownloadError: 主页面明确返回 403 或访问受限标题时抛出。
+            VideoDownloadError: 无界面模式确认访问受限，或可视化模式等待人工
+                验证到期后仍未进入播放器时抛出。
         """
         from playwright.sync_api import sync_playwright
 
@@ -421,14 +435,28 @@ class PageSniffer:
                     # 整个页面事件循环；失败响应由后续候选继续补偿。
                     pass
 
-            def wait_for_candidates():
-                """按可靠候选策略等待媒体请求，并为可视模式保留人工操作时间。"""
-                if self.options.visible:
-                    self.log(
-                        f"[*] 可视化嗅探等待 {self.options.manual_wait_seconds} 秒；"
-                        "请在浏览器中完成允许的人工操作并点击播放。"
-                    )
-                deadline = time.monotonic() + self.options.manual_wait_seconds
+            def capture_access_snapshot(status_code=None):
+                """重新读取当前页面状态，避免沿用首次导航的过期 403。"""
+                return PageAccessSnapshot(
+                    status_code=status_code,
+                    title=page.title(),
+                    final_url=page.url,
+                    video_count=page.locator("video").count(),
+                    iframe_count=page.locator("iframe").count(),
+                )
+
+            def log_access_snapshot(prefix, snapshot):
+                """记录一次可供用户核对的页面访问快照。"""
+                self.log(
+                    f"[*] {prefix}: "
+                    f"状态码={snapshot.status_code}, "
+                    f"标题={snapshot.title or '未知'}, "
+                    f"video={snapshot.video_count}, "
+                    f"iframe={snapshot.iframe_count}"
+                )
+
+            def wait_for_candidates(deadline):
+                """在共享截止时间内按可靠候选策略等待媒体请求。"""
                 # 使用真实截止时间，把同步响应回调的耗时也计入观察预算。
                 while not has_reliable_media_candidate(candidates):
                     remaining = deadline - time.monotonic()
@@ -478,28 +506,21 @@ class PageSniffer:
                     warnings.append(warning)
                     self.log(f"[!] {warning}；继续观察媒体请求。")
 
-                try:
-                    access_snapshot = PageAccessSnapshot(
-                        status_code=(
-                            main_response.status if main_response else None
-                        ),
-                        title=page.title(),
-                        final_url=page.url,
-                        video_count=page.locator("video").count(),
-                        iframe_count=page.locator("iframe").count(),
-                    )
+                deadline = time.monotonic() + self.options.manual_wait_seconds
+                if self.options.visible:
                     self.log(
-                        "[*] 页面诊断: "
-                        f"状态码={access_snapshot.status_code}, "
-                        f"标题={access_snapshot.title or '未知'}, "
-                        f"video={access_snapshot.video_count}, "
-                        f"iframe={access_snapshot.iframe_count}"
+                        f"[*] 可视化嗅探等待 {self.options.manual_wait_seconds} 秒；"
+                        "请在浏览器中完成允许的人工操作并点击播放。"
                     )
+
+                access_snapshot = None
+                access_error = None
+                try:
+                    access_snapshot = capture_access_snapshot(
+                        main_response.status if main_response else None
+                    )
+                    log_access_snapshot("页面诊断", access_snapshot)
                     access_error = detect_access_limited_page(access_snapshot)
-                    if access_error:
-                        raise access_error
-                except VideoDownloadError:
-                    raise
                 except Exception as exc:
                     navigation_incomplete = True
                     safe_error = redact_for_display(str(exc))
@@ -507,10 +528,95 @@ class PageSniffer:
                     warnings.append(warning)
                     self.log(f"[!] {warning}；继续观察媒体请求。")
 
-                self.log("[*] 正在尝试触发播放器以产生真实数据流...")
-                trigger_result = trigger_playback(page)
-                self.log(f"[*] 播放器触发方式: {trigger_result}")
-                wait_for_candidates()
+                if access_error and not self.options.visible:
+                    raise access_error
+
+                if access_error:
+                    self.log(
+                        "[*] 检测到安全验证页；请在浏览器中完成站点允许的"
+                        "人工验证，程序会在验证通过后继续嗅探。"
+                    )
+                    access_cleared = False
+                    current_snapshot = access_snapshot
+                    while not has_reliable_media_candidate(candidates):
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        page.wait_for_timeout(
+                            max(1, min(1000, int(remaining * 1000)))
+                        )
+                        try:
+                            current_snapshot = capture_access_snapshot()
+                        except Exception as exc:
+                            safe_error = redact_for_display(str(exc))
+                            warning = (
+                                "安全验证页面切换中，暂时无法读取页面状态: "
+                                f"{safe_error}"
+                            )
+                            if warning not in warnings and len(warnings) < 10:
+                                warnings.append(warning)
+                                self.log(f"[!] {warning}；继续等待页面稳定。")
+                            continue
+                        current_error = detect_access_limited_page(
+                            current_snapshot
+                        )
+                        has_current_page = bool(
+                            current_snapshot.title.strip()
+                            or current_snapshot.video_count
+                            or current_snapshot.iframe_count
+                        )
+                        if current_error is None and has_current_page:
+                            access_cleared = True
+                            self.log(
+                                "[+] 安全验证已通过；正在进入真实播放器。"
+                            )
+                            log_access_snapshot(
+                                "验证后页面诊断",
+                                current_snapshot,
+                            )
+                            break
+
+                    if (
+                        not access_cleared
+                        and not has_reliable_media_candidate(candidates)
+                    ):
+                        try:
+                            final_snapshot = capture_access_snapshot()
+                        except Exception as exc:
+                            safe_error = redact_for_display(str(exc))
+                            self.log(
+                                "[!] 安全验证等待结束时仍无法读取页面状态: "
+                                f"{safe_error}"
+                            )
+                            raise access_error
+                        final_error = detect_access_limited_page(final_snapshot)
+                        if final_error:
+                            final_snapshot = PageAccessSnapshot(
+                                status_code=access_snapshot.status_code,
+                                title=final_snapshot.title,
+                                final_url=final_snapshot.final_url,
+                                video_count=final_snapshot.video_count,
+                                iframe_count=final_snapshot.iframe_count,
+                            )
+                            log_access_snapshot(
+                                "安全验证等待结束",
+                                final_snapshot,
+                            )
+                            raise (
+                                detect_access_limited_page(final_snapshot)
+                                or access_error
+                            )
+                        self.log(
+                            "[+] 安全验证已通过；正在进入真实播放器。"
+                        )
+
+                if has_reliable_media_candidate(candidates):
+                    wait_for_candidates(deadline)
+                else:
+                    self.log("[*] 正在尝试触发播放器以产生真实数据流...")
+                    trigger_result = trigger_playback(page)
+                    self.log(f"[*] 播放器触发方式: {trigger_result}")
+                    wait_for_candidates(deadline)
             finally:
                 # 必须在 context/page 关闭前提取 Cookie、LocalStorage 和 UA；
                 # 下载适配器随后使用这些数据访问要求同一会话的 CDN。
