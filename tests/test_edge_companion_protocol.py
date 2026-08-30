@@ -44,6 +44,15 @@ class EdgeCompanionProtocolTests(unittest.TestCase):
         with self.assertRaises(EdgeProtocolError):
             parse_candidate_json("x" * (256 * 1024 + 1))
 
+    def test_wraps_malformed_http_url_as_invalid_url(self):
+        message = valid_edge_message()
+        message["candidate"]["url"] = "http://[::1"
+
+        with self.assertRaises(EdgeProtocolError) as caught:
+            parse_candidate_json(json.dumps(message))
+
+        self.assertEqual(caught.exception.code, "INVALID_URL")
+
     def test_task_payload_is_revalidated_and_expiry_is_reported(self):
         candidate = parse_candidate_json(json.dumps(valid_edge_message()))
         task_payload = serialize_candidate(candidate)
