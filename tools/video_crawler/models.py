@@ -85,7 +85,7 @@ class PageAccessSnapshot:
 
 @dataclass(frozen=True)
 class SnifferOptions:
-    """配置 Playwright 的可视化、持久会话和等待行为。"""
+    """配置 Playwright 的浏览器、可视化、持久会话和等待行为。"""
 
     #: 是否无界面运行 Chromium；False 时允许用户在浏览器中进行合法操作。
     headless: bool = True
@@ -93,8 +93,24 @@ class SnifferOptions:
     use_persistent_profile: bool = False
     #: 持久化 profile 的本地目录；其中可能含敏感会话信息，禁止提交 Git。
     profile_dir: str = "./browser_profiles/video_crawler"
+    #: 是否改用本机安装的 Google Chrome；该实验模式不会隐藏自动化标记。
+    use_system_chrome: bool = False
+    #: 系统 Chrome 的独立 profile，禁止与 Playwright Chromium profile 混用。
+    system_chrome_profile_dir: str = "./browser_profiles/video_crawler_chrome"
     #: 等待播放器产生可靠媒体请求的最长秒数。
     manual_wait_seconds: int = 25
+
+    @property
+    def browser_channel(self) -> str | None:
+        """返回 Playwright 浏览器通道；None 表示使用随附 Chromium。"""
+        return "chrome" if self.use_system_chrome else None
+
+    @property
+    def active_profile_dir(self) -> str:
+        """返回当前浏览器类型对应的持久化 profile 目录。"""
+        if self.use_system_chrome:
+            return self.system_chrome_profile_dir
+        return self.profile_dir
 
     # @property 是 Python 的一个装饰器，可以把一个方法变成“属性”来访问。
     @property

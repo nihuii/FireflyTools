@@ -207,6 +207,20 @@ class SnifferOptionsTests(unittest.TestCase):
         self.assertIn("browser_profiles", options.profile_dir)
         self.assertIn("video_crawler", options.profile_dir)
 
+    def test_default_options_use_bundled_chromium_profile(self):
+        options = SnifferOptions()
+
+        self.assertFalse(options.use_system_chrome)
+        self.assertIsNone(options.browser_channel)
+        self.assertEqual(options.active_profile_dir, options.profile_dir)
+
+    def test_system_chrome_uses_channel_and_independent_profile(self):
+        options = SnifferOptions(use_system_chrome=True)
+
+        self.assertEqual(options.browser_channel, "chrome")
+        self.assertIn("video_crawler_chrome", options.active_profile_dir)
+        self.assertNotEqual(options.active_profile_dir, options.profile_dir)
+
     def test_visible_is_inverse_of_headless(self):
         options = SnifferOptions(headless=False)
 
@@ -219,6 +233,70 @@ class PageSnifferOptionsWiringTests(unittest.TestCase):
         sniffer = PageSniffer(options=options)
 
         self.assertIs(sniffer.options, options)
+
+
+class PageSnifferBrowserLaunchTests(unittest.TestCase):
+    def test_default_browser_omits_channel_from_launch(self):
+        playwright = RecordingLaunchPlaywright()
+
+        browser, context = PageSniffer()._launch_context(playwright)
+
+        self.assertNotIn("channel", playwright.chromium.launch_kwargs)
+        self.assertIsNotNone(browser)
+        self.assertIsNotNone(context)
+
+    def test_nonpersistent_system_chrome_passes_channel_to_launch(self):
+        playwright = RecordingLaunchPlaywright()
+        sniffer = PageSniffer(options=SnifferOptions(use_system_chrome=True))
+
+        browser, context = sniffer._launch_context(playwright)
+
+        self.assertEqual(playwright.chromium.launch_kwargs["channel"], "chrome")
+        self.assertIsNotNone(browser)
+        self.assertIsNotNone(context)
+
+    def test_persistent_system_chrome_uses_independent_profile(self):
+        playwright = RecordingLaunchPlaywright()
+        options = SnifferOptions(
+            use_persistent_profile=True,
+            use_system_chrome=True,
+            system_chrome_profile_dir="./test-system-chrome-profile",
+        )
+
+        with patch("tools.video_crawler.sniffer.os.makedirs") as makedirs:
+            browser, context = PageSniffer(options=options)._launch_context(playwright)
+
+        makedirs.assert_called_once_with(options.active_profile_dir, exist_ok=True)
+        self.assertIsNone(browser)
+        self.assertIsNotNone(context)
+        self.assertEqual(
+            playwright.chromium.persistent_profile_dir,
+            options.active_profile_dir,
+        )
+        self.assertEqual(
+            playwright.chromium.persistent_kwargs["channel"],
+            "chrome",
+        )
+
+    def test_system_chrome_launch_failure_logs_without_fallback(self):
+        playwright = RecordingLaunchPlaywright(
+            launch_error=RuntimeError("chrome executable missing")
+        )
+        logs = []
+        sniffer = PageSniffer(
+            log_callback=logs.append,
+            options=SnifferOptions(use_system_chrome=True),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "executable missing"):
+            sniffer._launch_context(playwright)
+
+        self.assertEqual(len(playwright.chromium.launch_calls), 1)
+        self.assertEqual(
+            playwright.chromium.launch_calls[0]["channel"],
+            "chrome",
+        )
+        self.assertTrue(any("系统 Chrome 启动失败" in message for message in logs))
 
 
 class ResponseTextCandidateTests(unittest.TestCase):
@@ -356,6 +434,32 @@ class FakeChromium:
 
     def launch(self, **kwargs):
         return FakeBrowser(self.page)
+
+
+class RecordingLaunchChromium:
+    def __init__(self, launch_error=None):
+        self.launch_kwargs = None
+        self.launch_calls = []
+        self.launch_error = launch_error
+        self.persistent_profile_dir = None
+        self.persistent_kwargs = None
+
+    def launch(self, **kwargs):
+        self.launch_kwargs = kwargs
+        self.launch_calls.append(kwargs)
+        if self.launch_error:
+            raise self.launch_error
+        return FakeBrowser()
+
+    def launch_persistent_context(self, profile_dir, **kwargs):
+        self.persistent_profile_dir = profile_dir
+        self.persistent_kwargs = kwargs
+        return FakeContext()
+
+
+class RecordingLaunchPlaywright:
+    def __init__(self, launch_error=None):
+        self.chromium = RecordingLaunchChromium(launch_error=launch_error)
 
 
 class FakeBrowser:

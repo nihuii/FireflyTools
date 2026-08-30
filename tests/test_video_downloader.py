@@ -1002,6 +1002,10 @@ class VideoDownloaderToolTests(unittest.TestCase):
     def test_default_sniff_wait_is_25_seconds(self):
         self.assertEqual(self.tool.sniff_wait_spin.value(), 25)
 
+    def test_system_chrome_mode_defaults_off(self):
+        self.assertFalse(self.tool.system_chrome_chk.isChecked())
+        self.assertIn("实验", self.tool.system_chrome_chk.text())
+
     def test_diagnose_button_is_available(self):
         self.assertEqual(self.tool.diagnose_btn.text(), "诊断链接")
 
@@ -1060,6 +1064,7 @@ class VideoDownloaderToolTests(unittest.TestCase):
     def test_diagnose_task_uses_ui_sniffer_options(self):
         self.tool.visible_sniff_chk.setChecked(True)
         self.tool.persistent_profile_chk.setChecked(True)
+        self.tool.system_chrome_chk.setChecked(True)
         self.tool.sniff_wait_spin.setValue(22)
 
         with patch("tools.video_downloader.PageSniffer") as sniffer_class:
@@ -1071,6 +1076,7 @@ class VideoDownloaderToolTests(unittest.TestCase):
         options = sniffer_class.call_args.kwargs["options"]
         self.assertFalse(options.headless)
         self.assertTrue(options.use_persistent_profile)
+        self.assertTrue(options.use_system_chrome)
         self.assertEqual(options.manual_wait_seconds, 22)
 
     def test_append_log_redacts_sensitive_text(self):
@@ -1142,6 +1148,7 @@ class VideoDownloaderToolTests(unittest.TestCase):
         self.tool.path_entry.setText("downloads")
         self.tool.visible_sniff_chk.setChecked(True)
         self.tool.persistent_profile_chk.setChecked(True)
+        self.tool.system_chrome_chk.setChecked(True)
         self.tool.sniff_wait_spin.setValue(25)
 
         self.tool.add_to_queue()
@@ -1149,6 +1156,7 @@ class VideoDownloaderToolTests(unittest.TestCase):
 
         self.assertFalse(task["sniffer_headless"])
         self.assertTrue(task["sniffer_use_persistent_profile"])
+        self.assertTrue(task["sniffer_use_system_chrome"])
         self.assertEqual(task["sniffer_manual_wait_seconds"], 25)
         self.tool.task_queue.task_done()
 
@@ -1167,6 +1175,7 @@ class VideoDownloaderToolTests(unittest.TestCase):
             "live_record_seconds": 123,
             "sniffer_headless": False,
             "sniffer_use_persistent_profile": True,
+            "sniffer_use_system_chrome": True,
             "sniffer_manual_wait_seconds": 33,
         }
 
@@ -1179,6 +1188,7 @@ class VideoDownloaderToolTests(unittest.TestCase):
         options = RecordingSpider.init_kwargs["sniffer_options"]
         self.assertFalse(options.headless)
         self.assertTrue(options.use_persistent_profile)
+        self.assertTrue(options.use_system_chrome)
         self.assertEqual(options.manual_wait_seconds, 33)
         tool.close()
 
@@ -1208,6 +1218,9 @@ class VideoDownloaderToolTests(unittest.TestCase):
                 "sniffer_options"
             ].manual_wait_seconds,
             25,
+        )
+        self.assertFalse(
+            RecordingSpider.init_kwargs["sniffer_options"].use_system_chrome
         )
 
     def test_execute_task_returns_structured_video_error(self):

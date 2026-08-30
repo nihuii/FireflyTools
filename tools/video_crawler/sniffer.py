@@ -327,20 +327,41 @@ class PageSniffer:
             "timezone_id": "Asia/Shanghai",
             "viewport": {"width": 1365, "height": 768},
         }
-        if self.options.use_persistent_profile:
-            os.makedirs(self.options.profile_dir, exist_ok=True)
-            context = playwright.chromium.launch_persistent_context(
-                self.options.profile_dir,
-                headless=self.options.headless,
-                args=launch_args,
-                **context_kwargs,
-            )
-            return None, context
+        launch_kwargs = {
+            "headless": self.options.headless,
+            "args": launch_args,
+        }
+        if self.options.browser_channel:
+            launch_kwargs["channel"] = self.options.browser_channel
 
-        browser = playwright.chromium.launch(
-            headless=self.options.headless,
-            args=launch_args,
-        )
+        if self.options.use_system_chrome:
+            self.log(
+                "[*] 浏览器内核：系统 Chrome（实验）；"
+                "该模式不会隐藏自动化标记。"
+            )
+        else:
+            self.log("[*] 浏览器内核：Playwright Chromium。")
+
+        try:
+            if self.options.use_persistent_profile:
+                os.makedirs(self.options.active_profile_dir, exist_ok=True)
+                context = playwright.chromium.launch_persistent_context(
+                    self.options.active_profile_dir,
+                    **launch_kwargs,
+                    **context_kwargs,
+                )
+                return None, context
+
+            browser = playwright.chromium.launch(
+                **launch_kwargs,
+            )
+        except Exception:
+            if self.options.use_system_chrome:
+                self.log(
+                    "[X] 系统 Chrome 启动失败；请确认已安装 Google Chrome。"
+                )
+            raise
+
         context = browser.new_context(**context_kwargs)
         return browser, context
 

@@ -152,6 +152,13 @@ class VideoDownloaderTool(QWidget):
         self.persistent_profile_chk = QCheckBox("复用浏览器会话")
         self.persistent_profile_chk.setChecked(False)
         self.sniff_options_layout.addWidget(self.persistent_profile_chk)
+        self.system_chrome_chk = QCheckBox("系统 Chrome（实验）")
+        self.system_chrome_chk.setChecked(False)
+        self.system_chrome_chk.setToolTip(
+            "使用本机 Google Chrome；仍由 Playwright 控制，"
+            "不会隐藏自动化标记，也不保证通过网站验证。"
+        )
+        self.sniff_options_layout.addWidget(self.system_chrome_chk)
         self.sniff_options_layout.addWidget(QLabel("等待:"))
         self.sniff_wait_spin = QSpinBox()
         self.sniff_wait_spin.setRange(5, 180)
@@ -245,9 +252,11 @@ class VideoDownloaderTool(QWidget):
             sniffer_options = self._build_sniffer_options()
             if not sniffer_options.headless:
                 self.log_signal.emit("[*] 诊断将打开可视化浏览器窗口。")
+            if sniffer_options.use_system_chrome:
+                self.log_signal.emit("[*] 诊断将使用本机 Google Chrome（实验）。")
             if sniffer_options.use_persistent_profile:
                 self.log_signal.emit(
-                    "[*] 诊断将复用 browser_profiles/video_crawler 会话。"
+                    f"[*] 诊断将复用 {sniffer_options.active_profile_dir} 会话。"
                 )
             service = VideoDiagnosticService(
                 sniffer=PageSniffer(
@@ -281,6 +290,7 @@ class VideoDownloaderTool(QWidget):
             "live_record_seconds": self.live_seconds_spin.value(),
             "sniffer_headless": not self.visible_sniff_chk.isChecked(),
             "sniffer_use_persistent_profile": self.persistent_profile_chk.isChecked(),
+            "sniffer_use_system_chrome": self.system_chrome_chk.isChecked(),
             "sniffer_manual_wait_seconds": self.sniff_wait_spin.value(),
         }
         self._enqueue_task(task)
@@ -307,6 +317,7 @@ class VideoDownloaderTool(QWidget):
         return SnifferOptions(
             headless=not self.visible_sniff_chk.isChecked(),
             use_persistent_profile=self.persistent_profile_chk.isChecked(),
+            use_system_chrome=self.system_chrome_chk.isChecked(),
             manual_wait_seconds=self.sniff_wait_spin.value(),
         )
 
@@ -326,6 +337,10 @@ class VideoDownloaderTool(QWidget):
                 headless=task.get("sniffer_headless", True),
                 use_persistent_profile=task.get(
                     "sniffer_use_persistent_profile",
+                    False,
+                ),
+                use_system_chrome=task.get(
+                    "sniffer_use_system_chrome",
                     False,
                 ),
                 manual_wait_seconds=task.get("sniffer_manual_wait_seconds", 25),
