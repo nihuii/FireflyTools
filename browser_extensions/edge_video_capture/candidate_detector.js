@@ -1,6 +1,7 @@
 "use strict";
 
 const EdgeCaptureDetector = (() => {
+  const MAX_URL_CHARS = 16 * 1024;
   const SAFE_HEADER_NAMES = Object.freeze({
     referer: "Referer",
     origin: "Origin",
@@ -17,13 +18,38 @@ const EdgeCaptureDetector = (() => {
   ]);
   const DASH_CONTENT_TYPES = new Set(["application/dash+xml"]);
   const MP4_CONTENT_TYPES = new Set(["video/mp4", "application/mp4"]);
-  const SECRET_QUERY_PARAMETER =
-    /([?&](?:access_token|authorization|auth|expires?|key|signature|sig|token)=)[^&#]*/gi;
+  const SENSITIVE_QUERY_NAMES = new Set([
+    "access_token",
+    "auth",
+    "authorization",
+    "token",
+    "key",
+    "sig",
+    "signature",
+    "x-amz-signature",
+    "x-amz-credential",
+    "x-amz-security-token",
+    "expires",
+    "expiry",
+    "policy",
+  ]);
+
+  function exceedsUrlCharacterLimit(url) {
+    let count = 0;
+    for (const _character of url) {
+      count += 1;
+      if (count > MAX_URL_CHARS) {
+        return true;
+      }
+    }
+    return false;
+  }
 
   function parseSafeHttpUrl(rawUrl) {
     if (
       typeof rawUrl !== "string" ||
       rawUrl.length === 0 ||
+      exceedsUrlCharacterLimit(rawUrl) ||
       /[\u0000-\u0020\u007f]/.test(rawUrl)
     ) {
       return null;
@@ -62,13 +88,22 @@ const EdgeCaptureDetector = (() => {
         : "";
     const pathname = parsed.pathname.toLowerCase();
 
-    if (HLS_CONTENT_TYPES.has(mime) || pathname.endsWith(".m3u8")) {
+    if (HLS_CONTENT_TYPES.has(mime)) {
       return "hls";
     }
-    if (DASH_CONTENT_TYPES.has(mime) || pathname.endsWith(".mpd")) {
+    if (DASH_CONTENT_TYPES.has(mime)) {
       return "dash";
     }
-    if (MP4_CONTENT_TYPES.has(mime) || pathname.endsWith(".mp4")) {
+    if (MP4_CONTENT_TYPES.has(mime)) {
+      return "direct_mp4";
+    }
+    if (pathname.endsWith(".m3u8")) {
+      return "hls";
+    }
+    if (pathname.endsWith(".mpd")) {
+      return "dash";
+    }
+    if (pathname.endsWith(".mp4")) {
       return "direct_mp4";
     }
     return null;
@@ -89,25 +124,33 @@ const EdgeCaptureDetector = (() => {
       ) {
         continue;
       }
-      const canonicalName = SAFE_HEADER_NAMES[header.name.toLowerCase()];
-      if (canonicalName) {
-        safeHeaders[canonicalName] = header.value;
+      const loweredName = header.name.toLowerCase();
+      if (!Object.hasOwn(SAFE_HEADER_NAMES, loweredName)) {
+        continue;
       }
+      safeHeaders[SAFE_HEADER_NAMES[loweredName]] = header.value;
     }
     return safeHeaders;
   }
 
   function redactUrl(url) {
-    if (typeof url !== "string") {
+    const parsed = parseSafeHttpUrl(url);
+    if (!parsed) {
       return "";
     }
-    return url.replace(SECRET_QUERY_PARAMETER, "$1<redacted>");
+    parsed.hash = "";
+    for (const [name] of Array.from(parsed.searchParams)) {
+      if (SENSITIVE_QUERY_NAMES.has(name.toLowerCase())) {
+        parsed.searchParams.set(name, "<redacted>");
+      }
+    }
+    return parsed.toString().replaceAll("%3Credacted%3E", "<redacted>");
   }
 
   function buildCandidate(details = {}) {
     const kind = detectKind(details);
     const method =
-      typeof details.method === "string" ? details.method.toUpperCase() : "GET";
+      typeof details.method === "string" ? details.method.toUpperCase() : "";
     if (!kind || (method !== "GET" && method !== "HEAD")) {
       return null;
     }

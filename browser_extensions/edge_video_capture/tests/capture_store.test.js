@@ -12,6 +12,18 @@ function candidate(kind, url, contentType = "") {
   };
 }
 
+function mediaUrlWithLength(length) {
+  const prefix = "https://cdn.test/";
+  const suffix = ".mp4";
+  return prefix + "a".repeat(length - prefix.length - suffix.length) + suffix;
+}
+
+function mediaUrlWithCodePointLength(length) {
+  const prefix = "https://cdn.test/";
+  const suffix = ".mp4";
+  return prefix + "😀".repeat(length - prefix.length - suffix.length) + suffix;
+}
+
 function fixedClock(start = 1_000) {
   let now = start;
   return {
@@ -46,6 +58,54 @@ test("accepts candidates only from the selected tab", () => {
   );
 });
 
+test("accepts V1 boundary URLs but rejects overlong candidates", () => {
+  const clock = fixedClock();
+  const session = store.createSession({ tabId: 7, clock: clock.now });
+  const boundaryUrl = mediaUrlWithLength(16 * 1024);
+  const overlongUrl = mediaUrlWithLength(16 * 1024 + 1);
+
+  assert.equal(
+    store.upsertCandidate(session, {
+      tabId: 7,
+      candidate: candidate("direct_mp4", boundaryUrl),
+    }),
+    true,
+  );
+  assert.equal(
+    store.upsertCandidate(session, {
+      tabId: 7,
+      candidate: candidate("direct_mp4", overlongUrl),
+    }),
+    false,
+  );
+  assert.deepEqual(
+    store.listCandidates(session).map((item) => item.url),
+    [boundaryUrl],
+  );
+});
+
+test("uses Unicode code points for the store URL limit", () => {
+  const clock = fixedClock();
+  const session = store.createSession({ tabId: 7, clock: clock.now });
+  const boundaryUrl = mediaUrlWithCodePointLength(16 * 1024);
+  const overlongUrl = mediaUrlWithCodePointLength(16 * 1024 + 1);
+
+  assert.equal(
+    store.upsertCandidate(session, {
+      tabId: 7,
+      candidate: candidate("direct_mp4", boundaryUrl),
+    }),
+    true,
+  );
+  assert.equal(
+    store.upsertCandidate(session, {
+      tabId: 7,
+      candidate: candidate("direct_mp4", overlongUrl),
+    }),
+    false,
+  );
+});
+
 test("deduplicates candidates by kind and URL", () => {
   const clock = fixedClock();
   const session = store.createSession({ tabId: 7, clock: clock.now });
@@ -71,6 +131,84 @@ test("deduplicates candidates by kind and URL", () => {
     candidates.find((item) => item.kind === "direct_mp4").contentType,
     "video/mp4; codecs=avc1",
   );
+});
+
+test("deep clones the complete candidate when upserting", () => {
+  const clock = fixedClock();
+  const session = store.createSession({ tabId: 7, clock: clock.now });
+  const input = {
+    ...candidate("hls", "https://cdn.test/master.m3u8"),
+    sequence: "source-sequence",
+    headers: { Referer: "https://site.test/watch" },
+    discovery: {
+      attempts: [{ source: "network", timings: [1, 2] }],
+    },
+  };
+
+  assert.equal(
+    store.upsertCandidate(session, { tabId: 7, candidate: input }),
+    true,
+  );
+  input.headers.Referer = "https://changed.test/";
+  input.discovery.attempts[0].source = "mutated";
+  input.discovery.attempts[0].timings.push(3);
+
+  assert.deepEqual(store.listCandidates(session)[0], {
+    ...candidate("hls", "https://cdn.test/master.m3u8"),
+    sequence: "source-sequence",
+    headers: { Referer: "https://site.test/watch" },
+    discovery: {
+      attempts: [{ source: "network", timings: [1, 2] }],
+    },
+  });
+});
+
+test("deep clones all nested data returned by listCandidates", () => {
+  const clock = fixedClock();
+  const session = store.createSession({ tabId: 7, clock: clock.now });
+  store.upsertCandidate(session, {
+    tabId: 7,
+    candidate: {
+      ...candidate("dash", "https://cdn.test/manifest.mpd"),
+      discovery: { sources: ["network"] },
+    },
+  });
+
+  const listed = store.listCandidates(session);
+  listed[0].headers.Accept = "changed";
+  listed[0].discovery.sources.push("mutated");
+
+  assert.deepEqual(store.listCandidates(session)[0], {
+    ...candidate("dash", "https://cdn.test/manifest.mpd"),
+    discovery: { sources: ["network"] },
+  });
+});
+
+test("safely rejects cyclic, uncloneable, and non-data candidates", () => {
+  const clock = fixedClock();
+  const session = store.createSession({ tabId: 7, clock: clock.now });
+  const cyclic = candidate("hls", "https://cdn.test/cyclic.m3u8");
+  cyclic.discovery = cyclic;
+  const withFunction = {
+    ...candidate("hls", "https://cdn.test/function.m3u8"),
+    discovery: { format: () => "not data" },
+  };
+  const withMap = {
+    ...candidate("hls", "https://cdn.test/map.m3u8"),
+    discovery: new Map([["source", "network"]]),
+  };
+
+  for (const invalidCandidate of [cyclic, withFunction, withMap]) {
+    let accepted;
+    assert.doesNotThrow(() => {
+      accepted = store.upsertCandidate(session, {
+        tabId: 7,
+        candidate: invalidCandidate,
+      });
+    });
+    assert.equal(accepted, false);
+  }
+  assert.deepEqual(store.listCandidates(session), []);
 });
 
 test("keeps HLS and DASH ahead of MP4 at the 50-item boundary", () => {

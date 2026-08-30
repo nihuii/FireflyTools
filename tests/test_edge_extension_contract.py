@@ -9,6 +9,7 @@ MANIFEST_PATH = (
     / "edge_video_capture"
     / "manifest.json"
 )
+PACKAGE_PATH = MANIFEST_PATH.with_name("package.json")
 EXPECTED_KEY = (
     "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsbFUu9s0WkJ5Y2jA03jaUT0l"
     "IR2II3dQ6w8Y52XB16224XEmVtzC7T28M8SbptzXNPSCVgeDGBo5FTukrB172AG/5Pya"
@@ -43,11 +44,40 @@ class EdgeExtensionManifestContractTests(unittest.TestCase):
         self.assertNotIn("cookies", manifest["permissions"])
         self.assertNotIn("webRequestBlocking", manifest["permissions"])
         self.assertNotIn("content_scripts", manifest)
+        self.assertNotIn("host_permissions", manifest)
+        self.assertNotIn("optional_permissions", manifest)
         self.assertEqual(
             manifest["optional_host_permissions"],
             ["http://*/*", "https://*/*"],
         )
         self.assertEqual(manifest["key"], EXPECTED_KEY)
+
+    def test_package_uses_only_node_test_without_dependencies(self):
+        with PACKAGE_PATH.open(encoding="utf-8") as package_file:
+            package = json.load(package_file)
+
+        self.assertEqual(package["name"], "fireflytools-edge-video-capture")
+        self.assertEqual(package["version"], "0.1.0")
+        self.assertIs(package["private"], True)
+        self.assertEqual(
+            package["scripts"],
+            {
+                "test": (
+                    "node --test tests/candidate_detector.test.js "
+                    "tests/capture_store.test.js"
+                )
+            },
+        )
+        for dependency_field in (
+            "dependencies",
+            "devDependencies",
+            "optionalDependencies",
+            "peerDependencies",
+            "bundledDependencies",
+            "bundleDependencies",
+        ):
+            with self.subTest(field=dependency_field):
+                self.assertNotIn(dependency_field, package)
 
 
 if __name__ == "__main__":
