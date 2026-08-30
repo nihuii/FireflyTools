@@ -47,7 +47,12 @@ def _require_http_url(value: object, field_name: str) -> str:
     """Return an HTTP(S) URL or reject the named field."""
     if not isinstance(value, str) or not value or len(value) > MAX_URL_CHARS:
         raise EdgeProtocolError("INVALID_URL", f"{field_name} 不是有效 URL")
-    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+    if any(
+        character.isspace()
+        or ord(character) < 0x20
+        or ord(character) == 0x7F
+        for character in value
+    ):
         raise EdgeProtocolError("INVALID_URL", f"{field_name} 不是有效 URL")
     try:
         parsed = urlsplit(value)
@@ -59,6 +64,8 @@ def _require_http_url(value: object, field_name: str) -> str:
         parsed.scheme not in {"http", "https"}
         or not parsed.netloc
         or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
     ):
         raise EdgeProtocolError("INVALID_URL", f"{field_name} 只允许 HTTP(S)")
     return value

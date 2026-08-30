@@ -81,6 +81,41 @@ class EdgeCompanionProtocolTests(unittest.TestCase):
                     parse_candidate_json(json.dumps(message))
                 self.assertEqual(caught.exception.code, "INVALID_URL")
 
+    def test_rejects_embedded_credentials_in_candidate_and_page_urls(self):
+        for section, url in (
+            ("candidate", "https://user:pass@example.test/video.mp4"),
+            ("page", "https://user@example.test/watch"),
+        ):
+            message = valid_edge_message()
+            message[section]["url"] = url
+            with self.subTest(section=section, url=url):
+                with self.assertRaises(EdgeProtocolError) as caught:
+                    parse_candidate_json(json.dumps(message))
+                self.assertEqual(caught.exception.code, "INVALID_URL")
+
+    def test_rejects_unescaped_whitespace_anywhere_in_urls(self):
+        for url in (
+            "https://example .test/video.mp4",
+            "https://example.test/video path.mp4",
+            "https://example.test/video\u00a0path.mp4",
+        ):
+            message = valid_edge_message()
+            message["candidate"]["url"] = url
+            with self.subTest(url=url):
+                with self.assertRaises(EdgeProtocolError) as caught:
+                    parse_candidate_json(json.dumps(message))
+                self.assertEqual(caught.exception.code, "INVALID_URL")
+
+    def test_preserves_percent_encoded_url_characters(self):
+        message = valid_edge_message()
+        url = "https://cdn.example.test/video%20name.mp4?redirect=%40safe"
+        message["candidate"]["url"] = url
+
+        candidate = parse_candidate_json(json.dumps(message))
+
+        self.assertEqual(candidate.media_url, url)
+        self.assertEqual(serialize_candidate(candidate)["candidate"]["url"], url)
+
     def test_task_payload_is_revalidated_and_expiry_is_reported(self):
         candidate = parse_candidate_json(json.dumps(valid_edge_message()))
         task_payload = serialize_candidate(candidate)
