@@ -1187,6 +1187,37 @@ class VideoDownloaderToolTests(unittest.TestCase):
         finally:
             tool.close()
 
+    def test_confirmed_candidate_blocks_waiting_transition(self):
+        dialog = RecordingEdgeDialog(accepted=True)
+        tool = VideoDownloaderTool(
+            start_worker=False,
+            clipboard_getter=lambda: json.dumps(valid_edge_message()),
+            edge_dialog_factory=lambda candidate, parent: dialog.bind(candidate),
+            now=fixed_edge_now,
+        )
+        try:
+            tool.paste_edge_candidate()
+            candidate = tool._pending_edge_candidate
+
+            tool.edge_wait_btn.click()
+
+            self.assertIs(tool._pending_edge_candidate, candidate)
+            self.assertFalse(tool._edge_waiting)
+            self.assertEqual(tool.edge_status_label.text(), "已收到候选")
+
+            tool.toggle_edge_waiting()
+
+            self.assertIs(tool._pending_edge_candidate, candidate)
+            self.assertFalse(tool._edge_waiting)
+            self.assertEqual(tool.edge_status_label.text(), "已收到候选")
+            self.assertFalse(tool.edge_wait_btn.isEnabled())
+            self.assertFalse(tool.visible_sniff_chk.isEnabled())
+            self.assertFalse(tool.persistent_profile_chk.isEnabled())
+            self.assertFalse(tool.system_chrome_chk.isEnabled())
+            self.assertFalse(tool.sniff_wait_spin.isEnabled())
+        finally:
+            tool.close()
+
     def test_wait_button_only_toggles_visible_waiting_state(self):
         self.tool.edge_wait_btn.click()
 
@@ -1376,6 +1407,58 @@ class VideoDownloaderToolTests(unittest.TestCase):
         self.assertTrue(task["sniffer_use_system_chrome"])
         self.assertEqual(task["sniffer_manual_wait_seconds"], 25)
         self.tool.task_queue.task_done()
+
+    def test_successful_queue_add_clears_confirmed_edge_candidate(self):
+        dialog = RecordingEdgeDialog(accepted=True)
+        tool = VideoDownloaderTool(
+            start_worker=False,
+            clipboard_getter=lambda: json.dumps(valid_edge_message()),
+            edge_dialog_factory=lambda candidate, parent: dialog.bind(candidate),
+            now=fixed_edge_now,
+        )
+        try:
+            tool.paste_edge_candidate()
+            tool.name_entry.setText("edge-video")
+
+            tool.add_to_queue()
+
+            self.assertEqual(tool.task_queue.qsize(), 1)
+            self.assertIsNone(tool._pending_edge_candidate)
+            self.assertEqual(tool.edge_status_label.text(), "未连接")
+            self.assertTrue(tool.edge_wait_btn.isEnabled())
+            self.assertTrue(tool.visible_sniff_chk.isEnabled())
+            self.assertTrue(tool.persistent_profile_chk.isEnabled())
+            self.assertTrue(tool.system_chrome_chk.isEnabled())
+            self.assertTrue(tool.sniff_wait_spin.isEnabled())
+        finally:
+            tool.close()
+
+    def test_failed_queue_validation_preserves_confirmed_edge_candidate(self):
+        dialog = RecordingEdgeDialog(accepted=True)
+        tool = VideoDownloaderTool(
+            start_worker=False,
+            clipboard_getter=lambda: json.dumps(valid_edge_message()),
+            edge_dialog_factory=lambda candidate, parent: dialog.bind(candidate),
+            now=fixed_edge_now,
+        )
+        try:
+            tool.paste_edge_candidate()
+            candidate = tool._pending_edge_candidate
+            tool.name_entry.clear()
+
+            with patch("tools.video_downloader.QMessageBox.warning"):
+                tool.add_to_queue()
+
+            self.assertEqual(tool.task_queue.qsize(), 0)
+            self.assertIs(tool._pending_edge_candidate, candidate)
+            self.assertEqual(tool.edge_status_label.text(), "已收到候选")
+            self.assertFalse(tool.edge_wait_btn.isEnabled())
+            self.assertFalse(tool.visible_sniff_chk.isEnabled())
+            self.assertFalse(tool.persistent_profile_chk.isEnabled())
+            self.assertFalse(tool.system_chrome_chk.isEnabled())
+            self.assertFalse(tool.sniff_wait_spin.isEnabled())
+        finally:
+            tool.close()
 
     def test_worker_passes_task_concurrency_to_spider(self):
         tool = VideoDownloaderTool(

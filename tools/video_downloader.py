@@ -265,6 +265,7 @@ class VideoDownloaderTool(QWidget):
         """Clear exclusive Edge input state and restore Playwright controls."""
         self._pending_edge_candidate = None
         self._set_playwright_controls_enabled(True)
+        self.edge_wait_btn.setEnabled(True)
         if self._edge_waiting:
             self.edge_status_label.setText("等待捕获")
         else:
@@ -272,6 +273,8 @@ class VideoDownloaderTool(QWidget):
 
     def toggle_edge_waiting(self):
         """Toggle only the visible placeholder state for future Edge receiving."""
+        if self._pending_edge_candidate is not None:
+            return
         self._edge_waiting = not self._edge_waiting
         if self._edge_waiting:
             self.edge_status_label.setText("等待捕获")
@@ -308,6 +311,7 @@ class VideoDownloaderTool(QWidget):
         self.url_entry.setText(candidate.media_url)
         self._edge_waiting = False
         self.edge_wait_btn.setText("等待 Edge 捕获")
+        self.edge_wait_btn.setEnabled(False)
         self.edge_status_label.setText("已收到候选")
         self._set_playwright_controls_enabled(False)
 
@@ -393,6 +397,9 @@ class VideoDownloaderTool(QWidget):
             "sniffer_manual_wait_seconds": self.sniff_wait_spin.value(),
         }
         self._enqueue_task(task)
+        # Only clear after a successful append. Task 5 can snapshot the candidate
+        # into ``task`` above before this cleanup point.
+        self.clear_edge_candidate()
         self.url_entry.clear()
 
     def _enqueue_task(self, task):
