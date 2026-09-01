@@ -33,6 +33,7 @@ const EdgeCaptureDetector = (() => {
     "expiry",
     "policy",
   ]);
+  const RAW_UNSAFE_CHARACTER = /[\u0000-\u0020\u007f]|\p{White_Space}/u;
 
   function exceedsUrlCharacterLimit(url) {
     let count = 0;
@@ -45,12 +46,19 @@ const EdgeCaptureDetector = (() => {
     return false;
   }
 
+  function hasRawAuthorityUserinfo(url) {
+    const authorityMatch =
+      /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^/?#]*)/.exec(url);
+    return Boolean(authorityMatch && authorityMatch[1].includes("@"));
+  }
+
   function parseSafeHttpUrl(rawUrl) {
     if (
       typeof rawUrl !== "string" ||
       rawUrl.length === 0 ||
       exceedsUrlCharacterLimit(rawUrl) ||
-      /[\u0000-\u0020\u007f]/.test(rawUrl)
+      RAW_UNSAFE_CHARACTER.test(rawUrl) ||
+      hasRawAuthorityUserinfo(rawUrl)
     ) {
       return null;
     }

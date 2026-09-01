@@ -2,6 +2,27 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const detector = require("../candidate_detector.js");
 
+const PYTHON_V1_REJECTED_WHITESPACE_URLS = [
+  ["NBSP in path", "https://cdn.test/video\u00a0name.mp4"],
+  ["em space in query", "https://cdn.test/video.mp4?name=a\u2003b"],
+  ["narrow NBSP in fragment", "https://cdn.test/video.mp4#a\u202fb"],
+  ["ideographic space in path", "https://cdn.test/a\u3000b.mp4"],
+];
+
+const PYTHON_V1_REJECTED_USERINFO_URLS = [
+  ["empty userinfo", "https://@cdn.test/video.mp4"],
+  ["username userinfo", "https://user@cdn.test/video.mp4"],
+  ["username and password", "https://user:pass@cdn.test/video.mp4"],
+];
+
+const PYTHON_V1_ALLOWED_AT_URLS = [
+  ["raw at in path", "https://cdn.test/@folder/video.mp4"],
+  ["raw at in query", "https://cdn.test/video.mp4?email=user@site.test"],
+  ["raw at in fragment", "https://cdn.test/video.mp4#user@site.test"],
+  ["encoded at in path", "https://cdn.test/user%40site.test/video.mp4"],
+  ["encoded NBSP in path", "https://cdn.test/video%C2%A0name.mp4"],
+];
+
 function mediaUrlWithLength(length) {
   const prefix = "https://cdn.test/";
   const suffix = ".mp4";
@@ -12,6 +33,25 @@ function mediaUrlWithCodePointLength(length) {
   const prefix = "https://cdn.test/";
   const suffix = ".mp4";
   return prefix + "😀".repeat(length - prefix.length - suffix.length) + suffix;
+}
+
+function assertUrlRejectedEverywhere(label, url) {
+  assert.equal(
+    detector.detectKind({ url, contentType: "video/mp4" }),
+    null,
+    `${label}: detectKind`,
+  );
+  assert.equal(
+    detector.buildCandidate({
+      url,
+      contentType: "video/mp4",
+      method: "GET",
+      requestHeaders: [],
+    }),
+    null,
+    `${label}: buildCandidate`,
+  );
+  assert.equal(detector.redactUrl(url), "", `${label}: redactUrl`);
 }
 
 test("classifies HLS, MP4, and DASH from URL or MIME", () => {
@@ -78,6 +118,39 @@ test("rejects unsafe schemes, ads, and unsupported resources", () => {
     }),
     null,
   );
+});
+
+test("matches Python V1 raw Unicode whitespace rejection", () => {
+  for (const [label, url] of PYTHON_V1_REJECTED_WHITESPACE_URLS) {
+    assertUrlRejectedEverywhere(label, url);
+  }
+});
+
+test("matches Python V1 authority userinfo rejection", () => {
+  for (const [label, url] of PYTHON_V1_REJECTED_USERINFO_URLS) {
+    assertUrlRejectedEverywhere(label, url);
+  }
+});
+
+test("allows at signs outside authority and percent-encoded whitespace", () => {
+  for (const [label, url] of PYTHON_V1_ALLOWED_AT_URLS) {
+    assert.equal(
+      detector.detectKind({ url, contentType: "video/mp4" }),
+      "direct_mp4",
+      `${label}: detectKind`,
+    );
+    assert.notEqual(
+      detector.buildCandidate({
+        url,
+        contentType: "video/mp4",
+        method: "GET",
+        requestHeaders: [],
+      }),
+      null,
+      `${label}: buildCandidate`,
+    );
+    assert.notEqual(detector.redactUrl(url), "", `${label}: redactUrl`);
+  }
 });
 
 test("accepts 16384-character URLs and rejects longer URLs everywhere", () => {
