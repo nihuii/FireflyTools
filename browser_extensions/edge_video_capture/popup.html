@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>FireflyTools 视频捕获</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main>
+      <h1>视频捕获</h1>
+      <div class="toolbar">
+        <button id="start-button" type="button">开始捕获</button>
+        <button id="stop-button" type="button" class="secondary">停止</button>
+      </div>
+      <p id="status" role="status" aria-live="polite"></p>
+      <fieldset>
+        <legend>已发现的媒体</legend>
+        <div id="candidate-list" class="candidate-list">
+          <p class="empty">尚未发现候选项。</p>
+        </div>
+      </fieldset>
+      <button id="copy-button" type="button" class="copy">复制所选候选项</button>
+    </main>
+    <script src="popup_model.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

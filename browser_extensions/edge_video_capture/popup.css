@@ -1,0 +1,81 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+  min-width: 360px;
+}
+
+main {
+  padding: 16px;
+}
+
+h1 {
+  font-size: 18px;
+  margin: 0 0 12px;
+}
+
+.toolbar {
+  display: flex;
+  gap: 8px;
+}
+
+button {
+  border: 1px solid #1769aa;
+  border-radius: 6px;
+  background: #1769aa;
+  color: white;
+  cursor: pointer;
+  padding: 8px 12px;
+}
+
+button.secondary {
+  background: transparent;
+  color: inherit;
+}
+
+#status {
+  min-height: 1.5em;
+  margin: 10px 0;
+}
+
+fieldset {
+  border: 1px solid #8886;
+  border-radius: 6px;
+  margin: 0 0 12px;
+  max-height: 280px;
+  overflow: auto;
+  padding: 8px;
+}
+
+.candidate-list label {
+  display: grid;
+  gap: 2px;
+  grid-template-columns: auto 1fr;
+  padding: 7px 2px;
+}
+
+.candidate-list label + label {
+  border-top: 1px solid #8884;
+}
+
+.candidate-summary,
+.candidate-url {
+  grid-column: 2;
+}
+
+.candidate-url {
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.empty {
+  color: #777;
+  margin: 8px;
+}
+
+.copy {
+  width: 100%;
+}
