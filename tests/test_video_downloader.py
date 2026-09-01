@@ -1,4 +1,6 @@
 ﻿import asyncio
+from datetime import datetime, timezone
+import json
 import os
 import requests
 import subprocess
@@ -10,9 +12,12 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication, QScrollArea
+from PyQt6.QtWidgets import QApplication, QDialog, QLabel, QScrollArea
 from PyQt6.QtCore import Qt
 
+from tests.edge_companion_fixtures import valid_edge_message
+from tools.edge_companion.protocol import parse_candidate_json
+from tools.edge_companion.ui import EdgeCandidateDialog
 from tools.video_downloader import (
     UniversalVideoSpider,
     VideoDownloadError,
@@ -28,6 +33,32 @@ from tools.video_crawler.models import (
 
 TEST_TEMP_ROOT = os.path.join(os.path.dirname(__file__), ".tmp")
 os.makedirs(TEST_TEMP_ROOT, exist_ok=True)
+
+
+class RecordingEdgeDialog:
+    """Record confirmation input while returning a configured dialog result."""
+
+    def __init__(self, accepted):
+        self.accepted = accepted
+        self.candidate = None
+        self.shown = False
+
+    def bind(self, candidate):
+        """Remember the candidate supplied by the production dialog factory."""
+        self.candidate = candidate
+        return self
+
+    def exec(self):
+        """Record display and return the configured Qt dialog result."""
+        self.shown = True
+        if self.accepted:
+            return QDialog.DialogCode.Accepted
+        return QDialog.DialogCode.Rejected
+
+
+def fixed_edge_now():
+    """Return a stable aware UTC time for Edge candidate tests."""
+    return datetime(2026, 8, 30, 12, 1, tzinfo=timezone.utc)
 
 
 class TrackingSpider(UniversalVideoSpider):
@@ -1008,6 +1039,192 @@ class VideoDownloaderToolTests(unittest.TestCase):
 
     def test_diagnose_button_is_available(self):
         self.assertEqual(self.tool.diagnose_btn.text(), "诊断链接")
+
+    def test_edge_controls_have_safe_disconnected_defaults(self):
+        self.assertEqual(self.tool.edge_status_label.text(), "未连接")
+        self.assertEqual(self.tool.edge_wait_btn.text(), "等待 Edge 捕获")
+        self.assertEqual(self.tool.edge_paste_btn.text(), "粘贴 Edge 候选")
+        self.assertIsNone(self.tool._pending_edge_candidate)
+
+    def test_paste_reads_clipboard_on_click_and_requires_confirmation(self):
+        reads = []
+        dialog = RecordingEdgeDialog(accepted=True)
+        tool = VideoDownloaderTool(
+            start_worker=False,
+            clipboard_getter=lambda: reads.append(True)
+            or json.dumps(valid_edge_message()),
+            edge_dialog_factory=lambda candidate, parent: dialog.bind(candidate),
+            now=fixed_edge_now,
+        )
+        try:
+            self.assertEqual(reads, [])
+
+            tool.edge_paste_btn.click()
+
+            self.assertEqual(reads, [True])
+            self.assertTrue(dialog.shown)
+            self.assertEqual(
+                tool.url_entry.text(),
+                valid_edge_message()["candidate"]["url"],
+            )
+            self.assertIs(tool._pending_edge_candidate, dialog.candidate)
+            self.assertFalse(tool.visible_sniff_chk.isEnabled())
+            self.assertFalse(tool.persistent_profile_chk.isEnabled())
+            self.assertFalse(tool.system_chrome_chk.isEnabled())
+            self.assertFalse(tool.sniff_wait_spin.isEnabled())
+            self.assertEqual(tool.edge_status_label.text(), "已收到候选")
+        finally:
+            tool.close()
+
+    def test_rejected_paste_preserves_existing_url_and_pending_candidate(self):
+        message = valid_edge_message()
+        dialog = RecordingEdgeDialog(accepted=True)
+        tool = VideoDownloaderTool(
+            start_worker=False,
+            clipboard_getter=lambda: json.dumps(message),
+            edge_dialog_factory=lambda candidate, parent: dialog.bind(candidate),
+            now=fixed_edge_now,
+        )
+        try:
+            tool.paste_edge_candidate()
+            original_url = tool.url_entry.text()
+            original_candidate = tool._pending_edge_candidate
+
+            message["candidate"]["url"] = "https://other.example.test/video.mp4"
+            message["candidate"]["kind"] = "direct_mp4"
+            dialog.accepted = False
+            tool.paste_edge_candidate()
+
+            self.assertEqual(tool.url_entry.text(), original_url)
+            self.assertIs(tool._pending_edge_candidate, original_candidate)
+            self.assertEqual(tool.edge_status_label.text(), "已收到候选")
+        finally:
+            tool.close()
+
+    def test_expired_paste_warns_without_changing_current_input(self):
+        dialog = RecordingEdgeDialog(accepted=True)
+        tool = VideoDownloaderTool(
+            start_worker=False,
+            clipboard_getter=lambda: json.dumps(valid_edge_message()),
+            edge_dialog_factory=lambda candidate, parent: dialog.bind(candidate),
+            now=lambda: datetime(
+                2026,
+                8,
+                30,
+                12,
+                6,
+                tzinfo=timezone.utc,
+            ),
+        )
+        tool.url_entry.setText("https://existing.example.test/watch")
+        try:
+            with patch("tools.video_downloader.QMessageBox.warning") as warning:
+                tool.paste_edge_candidate()
+
+            self.assertFalse(dialog.shown)
+            self.assertEqual(
+                tool.url_entry.text(),
+                "https://existing.example.test/watch",
+            )
+            self.assertIsNone(tool._pending_edge_candidate)
+            self.assertIn("过期", warning.call_args.args[2])
+        finally:
+            tool.close()
+
+    def test_invalid_json_or_protocol_warns_without_changing_current_input(self):
+        clipboard = ["not json"]
+        dialog_calls = []
+        tool = VideoDownloaderTool(
+            start_worker=False,
+            clipboard_getter=lambda: clipboard[0],
+            edge_dialog_factory=lambda candidate, parent: dialog_calls.append(
+                candidate
+            ),
+            now=fixed_edge_now,
+        )
+        tool.url_entry.setText("https://existing.example.test/watch")
+        try:
+            invalid_version = valid_edge_message()
+            invalid_version["protocol_version"] = 2
+            with patch("tools.video_downloader.QMessageBox.warning") as warning:
+                for raw in ("not json", json.dumps(invalid_version)):
+                    with self.subTest(raw=raw[:20]):
+                        clipboard[0] = raw
+                        tool.paste_edge_candidate()
+                        self.assertEqual(
+                            tool.url_entry.text(),
+                            "https://existing.example.test/watch",
+                        )
+                        self.assertIsNone(tool._pending_edge_candidate)
+
+            self.assertEqual(dialog_calls, [])
+            self.assertEqual(warning.call_count, 2)
+            self.assertTrue(
+                all("无效" in call.args[2] for call in warning.call_args_list)
+            )
+        finally:
+            tool.close()
+
+    def test_clearing_confirmed_candidate_restores_playwright_controls(self):
+        dialog = RecordingEdgeDialog(accepted=True)
+        tool = VideoDownloaderTool(
+            start_worker=False,
+            clipboard_getter=lambda: json.dumps(valid_edge_message()),
+            edge_dialog_factory=lambda candidate, parent: dialog.bind(candidate),
+            now=fixed_edge_now,
+        )
+        try:
+            tool.paste_edge_candidate()
+
+            tool.clear_edge_candidate()
+
+            self.assertIsNone(tool._pending_edge_candidate)
+            self.assertEqual(tool.edge_status_label.text(), "未连接")
+            self.assertTrue(tool.visible_sniff_chk.isEnabled())
+            self.assertTrue(tool.persistent_profile_chk.isEnabled())
+            self.assertTrue(tool.system_chrome_chk.isEnabled())
+            self.assertTrue(tool.sniff_wait_spin.isEnabled())
+        finally:
+            tool.close()
+
+    def test_wait_button_only_toggles_visible_waiting_state(self):
+        self.tool.edge_wait_btn.click()
+
+        self.assertEqual(self.tool.edge_status_label.text(), "等待捕获")
+        self.assertEqual(self.tool.edge_wait_btn.text(), "停止等待")
+
+        self.tool.edge_wait_btn.click()
+
+        self.assertEqual(self.tool.edge_status_label.text(), "未连接")
+        self.assertEqual(self.tool.edge_wait_btn.text(), "等待 Edge 捕获")
+
+    def test_edge_confirmation_dialog_shows_only_safe_candidate_metadata(self):
+        self.assertIsNotNone(EdgeCandidateDialog)
+        for headers_present in (True, False):
+            with self.subTest(headers_present=headers_present):
+                message = valid_edge_message()
+                if not headers_present:
+                    message["candidate"]["headers"] = {}
+                candidate = parse_candidate_json(json.dumps(message))
+                dialog = EdgeCandidateDialog(candidate)
+                try:
+                    text = "\n".join(
+                        label.text() for label in dialog.findChildren(QLabel)
+                    )
+                finally:
+                    dialog.close()
+
+                self.assertIn("页面来源: example.test", text)
+                self.assertIn("媒体主机: cdn.example.test", text)
+                self.assertIn("媒体类型: HLS", text)
+                self.assertIn("捕获时间 (UTC): 2026-08-30 12:00:00", text)
+                expected = "是" if headers_present else "否"
+                self.assertIn(f"包含临时请求头: {expected}", text)
+                self.assertNotIn("token=opaque", text)
+                self.assertNotIn("Edge UA", text)
+                self.assertNotIn("https://example.test/", text)
+                self.assertNotIn("Referer", text)
+                self.assertNotIn("Origin", text)
 
     def test_settings_area_is_scrollable_and_split_into_rows(self):
         self.assertIsInstance(self.tool.scroll_area, QScrollArea)

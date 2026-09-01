@@ -1,5 +1,6 @@
 """实现视频下载爬虫的 PyQt6 界面、任务队列和批次结果反馈。"""
 
+from datetime import datetime, timezone
 import os
 import threading
 import queue
@@ -7,9 +8,11 @@ import queue
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QLineEdit, QPushButton, QListWidget, QTextEdit, QFileDialog,
                              QMessageBox, QFrame, QSpinBox, QCheckBox, QScrollArea,
-                             QSizePolicy)
+                             QSizePolicy, QApplication, QDialog)
 from PyQt6.QtCore import pyqtSignal, Qt
 
+from tools.edge_companion.protocol import EdgeProtocolError, parse_candidate_json
+from tools.edge_companion.ui import EdgeCandidateDialog
 from tools.theme_utils import apply_shadow
 from tools.video_crawler.adapters.ytdlp import YtDlpAdapter
 from tools.video_crawler.errors import VideoDownloadError, VideoErrorCode
@@ -30,15 +33,32 @@ class VideoDownloaderTool(QWidget):
     queue_pop_signal = pyqtSignal()
     batch_finished_signal = pyqtSignal(object)
 
-    def __init__(self, start_worker=True, spider_factory=UniversalVideoSpider):
+    def __init__(
+        self,
+        start_worker=True,
+        spider_factory=UniversalVideoSpider,
+        clipboard_getter=None,
+        edge_dialog_factory=None,
+        now=None,
+    ):
         """初始化下载界面并按需启动队列工作线程。
 
         Args:
             start_worker: 是否立即启动永久消费队列的守护线程。测试可关闭它。
             spider_factory: 创建爬虫实例的工厂，允许测试注入轻量替身。
+            clipboard_getter: 按需读取剪贴板文本的可调用对象。
+            edge_dialog_factory: 创建 Edge 候选确认对话框的可调用对象。
+            now: 返回当前带时区时间的可调用对象。
         """
         super().__init__()
         self.spider_factory = spider_factory
+        self._clipboard_getter = clipboard_getter or self._qt_clipboard_text
+        self._edge_dialog_factory = edge_dialog_factory or (
+            lambda candidate, parent: EdgeCandidateDialog(candidate, parent)
+        )
+        self._now = now or (lambda: datetime.now(timezone.utc))
+        self._pending_edge_candidate = None
+        self._edge_waiting = False
         self.task_queue = queue.Queue()
         self._batch_results = []
         self.is_high_speed_mode = False  # 默认使用低速稳定模式
@@ -168,6 +188,20 @@ class VideoDownloaderTool(QWidget):
         self.sniff_options_layout.addWidget(self.sniff_wait_spin)
         self.sniff_options_layout.addStretch()
         options_layout.addLayout(self.sniff_options_layout)
+
+        self.edge_controls_layout = QHBoxLayout()
+        self.edge_controls_layout.setSpacing(12)
+        self.edge_controls_layout.addWidget(QLabel("Edge 捕获:"))
+        self.edge_status_label = QLabel("未连接")
+        self.edge_controls_layout.addWidget(self.edge_status_label)
+        self.edge_wait_btn = QPushButton("等待 Edge 捕获")
+        self.edge_wait_btn.clicked.connect(self.toggle_edge_waiting)
+        self.edge_controls_layout.addWidget(self.edge_wait_btn)
+        self.edge_paste_btn = QPushButton("粘贴 Edge 候选")
+        self.edge_paste_btn.clicked.connect(self.paste_edge_candidate)
+        self.edge_controls_layout.addWidget(self.edge_paste_btn)
+        self.edge_controls_layout.addStretch()
+        options_layout.addLayout(self.edge_controls_layout)
         layout.addLayout(options_layout)
 
         btn_layout = QHBoxLayout()
@@ -211,6 +245,71 @@ class VideoDownloaderTool(QWidget):
         """打开目录选择器并把用户选择写回输入框。"""
         folder = QFileDialog.getExistingDirectory(self, "选择保存位置")
         if folder: self.path_entry.setText(folder)
+
+    @staticmethod
+    def _qt_clipboard_text():
+        """Read current Qt clipboard text only when explicitly requested."""
+        return QApplication.clipboard().text()
+
+    def _set_playwright_controls_enabled(self, enabled):
+        """Enable or disable all controls that configure Playwright sniffing."""
+        for control in (
+            self.visible_sniff_chk,
+            self.persistent_profile_chk,
+            self.system_chrome_chk,
+            self.sniff_wait_spin,
+        ):
+            control.setEnabled(enabled)
+
+    def clear_edge_candidate(self):
+        """Clear exclusive Edge input state and restore Playwright controls."""
+        self._pending_edge_candidate = None
+        self._set_playwright_controls_enabled(True)
+        if self._edge_waiting:
+            self.edge_status_label.setText("等待捕获")
+        else:
+            self.edge_status_label.setText("未连接")
+
+    def toggle_edge_waiting(self):
+        """Toggle only the visible placeholder state for future Edge receiving."""
+        self._edge_waiting = not self._edge_waiting
+        if self._edge_waiting:
+            self.edge_status_label.setText("等待捕获")
+            self.edge_wait_btn.setText("停止等待")
+        else:
+            self.edge_status_label.setText("未连接")
+            self.edge_wait_btn.setText("等待 Edge 捕获")
+
+    def paste_edge_candidate(self):
+        """Validate, confirm, and activate a candidate from clipboard JSON."""
+        try:
+            candidate = parse_candidate_json(self._clipboard_getter())
+        except EdgeProtocolError:
+            QMessageBox.warning(
+                self,
+                "Edge 候选无效",
+                "Edge 候选无效，请复制完整的 V1 JSON 消息。",
+            )
+            return
+
+        if candidate.is_expired(self._now()):
+            QMessageBox.warning(
+                self,
+                "Edge 候选已过期",
+                "Edge 候选已过期，请在 Edge 中重新捕获后再粘贴。",
+            )
+            return
+
+        dialog = self._edge_dialog_factory(candidate, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        self._pending_edge_candidate = candidate
+        self.url_entry.setText(candidate.media_url)
+        self._edge_waiting = False
+        self.edge_wait_btn.setText("等待 Edge 捕获")
+        self.edge_status_label.setText("已收到候选")
+        self._set_playwright_controls_enabled(False)
 
     def append_log(self, message):
         """把经过处理的消息追加到日志控件并滚动到底部。"""
