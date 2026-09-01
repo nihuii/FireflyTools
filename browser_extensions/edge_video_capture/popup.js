@@ -99,12 +99,15 @@
   });
 
   stopButton.addEventListener("click", async () => {
-    activeTab = await currentTab();
-    if (activeTab && Number.isInteger(activeTab.id)) {
-      await chrome.runtime.sendMessage({
-        type: "capture:stop",
-        tabId: activeTab.id,
-      });
+    let response = null;
+    try {
+      response = await chrome.runtime.sendMessage({type: "capture:stop"});
+    } catch (_error) {
+      response = null;
+    }
+    if (!response || !response.ok) {
+      showStatus("stop_failed");
+      return;
     }
     selectedCandidateId = "";
     renderCandidates([]);

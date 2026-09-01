@@ -72,9 +72,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         await persistController();
         return {ok: true};
       case "capture:stop":
-        controller.stop(message.tabId);
+        const stopped = controller.stop();
         await persistController();
-        return {ok: true};
+        return {ok: stopped};
       case "capture:list":
         return {ok: true, candidates: controller.list(message.tabId)};
       case "capture:protocol":

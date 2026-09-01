@@ -10,6 +10,7 @@ const EdgeCapturePopupModel = (() => {
     permission_denied: "未授权网页和 CDN 访问权限，捕获未开始。",
     capturing: "正在捕获当前标签页…",
     stopped: "捕获已停止。",
+    stop_failed: "未找到正在捕获的会话。",
     copied: "已复制所选候选项。",
     copy_failed: "复制失败，请重试。",
     select_candidate: "请先选择一个候选项。",

@@ -69,6 +69,7 @@ const EdgeCaptureController = (() => {
         pageUrl: typeof pageUrl === "string" ? pageUrl : "",
         pageTitle: typeof pageTitle === "string" ? pageTitle : "",
         startedAt: session.startedAt,
+        nextCandidateSequence: 1,
         session,
       });
       activeTabId = tabId;
@@ -160,11 +161,24 @@ const EdgeCaptureController = (() => {
       if (!candidate) {
         return false;
       }
+      const record = sessions.get(details.tabId);
+      const storedCandidates = store.listCandidates(record.session);
+      const existingCandidate = storedCandidates.find(
+        (item) => item.kind === candidate.kind && item.url === candidate.url,
+      );
+      let candidateId = existingCandidate && existingCandidate.id;
+      if (!candidateId) {
+        const usedIds = new Set(storedCandidates.map((item) => item.id));
+        do {
+          candidateId = `c${record.nextCandidateSequence}`;
+          record.nextCandidateSequence += 1;
+        } while (usedIds.has(candidateId));
+      }
       const capturedAt = now();
-      return store.upsertCandidate(sessions.get(details.tabId).session, {
+      return store.upsertCandidate(record.session, {
         tabId: details.tabId,
         candidate: {
-          id: details.requestId,
+          id: candidateId,
           ...candidate,
           capturedAt,
         },
@@ -224,6 +238,7 @@ const EdgeCaptureController = (() => {
           pageUrl: record.pageUrl,
           pageTitle: record.pageTitle,
           startedAt: record.startedAt,
+          nextCandidateSequence: record.nextCandidateSequence,
           candidates: list(tabId).map((candidate) => ({
             ...candidate,
             headers: safeHeaderObject(candidate.headers),
@@ -280,6 +295,12 @@ const EdgeCaptureController = (() => {
         current.startedAt = record.startedAt;
         current.session.startedAt = record.startedAt;
       }
+      if (
+        Number.isSafeInteger(record.nextCandidateSequence) &&
+        record.nextCandidateSequence > 0
+      ) {
+        current.nextCandidateSequence = record.nextCandidateSequence;
+      }
       if (Array.isArray(record.candidates)) {
         for (const persisted of record.candidates) {
           if (!persisted || typeof persisted !== "object") {
@@ -296,10 +317,21 @@ const EdgeCaptureController = (() => {
           if (!candidate) {
             continue;
           }
+          const persistedId =
+            typeof persisted.id === "string" && /^c[1-9]\d*$/.test(persisted.id)
+              ? persisted.id
+              : `c${current.nextCandidateSequence}`;
+          const numericId = Number(persistedId.slice(1));
+          if (Number.isSafeInteger(numericId)) {
+            current.nextCandidateSequence = Math.max(
+              current.nextCandidateSequence,
+              numericId + 1,
+            );
+          }
           store.upsertCandidate(current.session, {
             tabId: record.tabId,
             candidate: {
-              id: typeof persisted.id === "string" ? persisted.id : "",
+              id: persistedId,
               ...candidate,
               capturedAt: Number.isFinite(persisted.capturedAt)
                 ? persisted.capturedAt

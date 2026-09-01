@@ -37,6 +37,10 @@ test("userMessage maps popup status codes to concise Chinese copy", () => {
   );
   assert.equal(popupModel.userMessage("capturing"), "正在捕获当前标签页…");
   assert.equal(popupModel.userMessage("stopped"), "捕获已停止。");
+  assert.equal(
+    popupModel.userMessage("stop_failed"),
+    "未找到正在捕获的会话。",
+  );
   assert.equal(popupModel.userMessage("copied"), "已复制所选候选项。");
   assert.equal(popupModel.userMessage("copy_failed"), "复制失败，请重试。");
   assert.equal(popupModel.userMessage("select_candidate"), "请先选择一个候选项。");

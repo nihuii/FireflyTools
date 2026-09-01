@@ -1,5 +1,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
 const detector = require("../candidate_detector.js");
 const store = require("../capture_store.js");
 const captureController = require("../capture_controller.js");
@@ -75,7 +78,7 @@ test("only an active selected tab produces candidates", () => {
   assert.deepEqual(controller.list(7), []);
   assert.deepEqual(
     controller.list(9).map((candidate) => candidate.id),
-    ["kept"],
+    ["c1"],
   );
 });
 
@@ -113,7 +116,7 @@ test("request headers and response Content-Type join by requestId", () => {
 
   assert.deepEqual(controller.list(7), [
     {
-      id: "r1",
+      id: "c1",
       url: "https://cdn.test/stream",
       redactedUrl: "https://cdn.test/stream",
       kind: "dash",
@@ -217,7 +220,7 @@ test("protocol message excludes sensitive headers and matches Python V1", () => 
     ],
   });
 
-  const message = controller.toProtocolMessage(7, "r1", "uuid-1");
+  const message = controller.toProtocolMessage(7, "c1", "uuid-1");
 
   assert.deepEqual(message, {
     protocol_version: 1,
@@ -270,4 +273,205 @@ test("restore rejects raw or sensitive persisted header names", () => {
   assert.equal(persisted.includes("sid=secret"), false);
   assert.equal(persisted.includes("Cookie"), false);
   assert.equal(persisted.includes("https://site.test/"), true);
+});
+
+test("redirect responses sharing a requestId receive distinct stable candidate ids", () => {
+  const controller = createControllerWithClock(
+    Date.parse("2026-08-30T12:00:00Z"),
+  );
+  startCapture(controller);
+
+  function captureUrl(url) {
+    controller.onBeforeRequest({
+      tabId: 7,
+      requestId: "redirect-chain",
+      url,
+      method: "GET",
+      type: "media",
+    });
+    controller.onHeadersReceived({
+      tabId: 7,
+      requestId: "redirect-chain",
+      url,
+      method: "GET",
+      responseHeaders: [
+        {name: "Content-Type", value: "application/vnd.apple.mpegurl"},
+      ],
+    });
+  }
+
+  captureUrl("https://redirect.test/first.m3u8");
+  captureUrl("https://cdn.test/final.m3u8");
+
+  const firstList = controller.list(7);
+  assert.deepEqual(
+    firstList.map((candidate) => [candidate.id, candidate.url]),
+    [
+      ["c1", "https://redirect.test/first.m3u8"],
+      ["c2", "https://cdn.test/final.m3u8"],
+    ],
+  );
+  assert.equal(
+    controller.toProtocolMessage(7, "c1", "export-1").candidate.url,
+    "https://redirect.test/first.m3u8",
+  );
+  assert.equal(
+    controller.toProtocolMessage(7, "c2", "export-2").candidate.url,
+    "https://cdn.test/final.m3u8",
+  );
+
+  captureUrl("https://cdn.test/final.m3u8");
+  assert.deepEqual(
+    controller.list(7).map((candidate) => [candidate.id, candidate.url]),
+    firstList.map((candidate) => [candidate.id, candidate.url]),
+  );
+});
+
+test("restored sessions continue candidate ids without reusing existing ids", () => {
+  const controller = createControllerWithClock(1000);
+  startCapture(controller);
+  captureHls(controller, {requestId: "request-before-restart"});
+
+  const restored = createControllerWithClock(1000);
+  restored.restore(controller.snapshot());
+  restored.onBeforeRequest({
+    tabId: 7,
+    requestId: "request-after-restart",
+    url: "https://cdn.test/b.m3u8",
+    method: "GET",
+    type: "media",
+  });
+  restored.onHeadersReceived({
+    tabId: 7,
+    requestId: "request-after-restart",
+    url: "https://cdn.test/b.m3u8",
+    method: "GET",
+    responseHeaders: [
+      {name: "Content-Type", value: "application/vnd.apple.mpegurl"},
+    ],
+  });
+
+  assert.deepEqual(
+    restored.list(7).map((candidate) => candidate.id),
+    ["c1", "c2"],
+  );
+});
+
+function chromeEvent() {
+  const listeners = [];
+  return {
+    listeners,
+    addListener(listener) {
+      listeners.push(listener);
+    },
+  };
+}
+
+function loadServiceWorker() {
+  const events = {
+    beforeRequest: chromeEvent(),
+    beforeSendHeaders: chromeEvent(),
+    headersReceived: chromeEvent(),
+    alarm: chromeEvent(),
+    tabRemoved: chromeEvent(),
+    runtimeMessage: chromeEvent(),
+  };
+  const storageState = {};
+  const chrome = {
+    storage: {
+      session: {
+        async get(key) {
+          return {[key]: storageState[key]};
+        },
+        async set(values) {
+          Object.assign(storageState, structuredClone(values));
+        },
+      },
+    },
+    webRequest: {
+      onBeforeRequest: events.beforeRequest,
+      onBeforeSendHeaders: events.beforeSendHeaders,
+      onHeadersReceived: events.headersReceived,
+    },
+    alarms: {
+      create() {},
+      onAlarm: events.alarm,
+    },
+    tabs: {onRemoved: events.tabRemoved},
+    runtime: {onMessage: events.runtimeMessage},
+  };
+  const context = vm.createContext({
+    chrome,
+    console,
+    URL,
+  });
+  vm.runInContext(
+    "globalThis.structuredClone = (value) => JSON.parse(JSON.stringify(value));",
+    context,
+  );
+  context.importScripts = (...filenames) => {
+    for (const filename of filenames) {
+      const source = fs.readFileSync(path.join(__dirname, "..", filename), "utf8");
+      vm.runInContext(source, context, {filename});
+    }
+  };
+  const workerSource = fs.readFileSync(
+    path.join(__dirname, "..", "service_worker.js"),
+    "utf8",
+  );
+  vm.runInContext(workerSource, context, {filename: "service_worker.js"});
+
+  return {
+    events,
+    sendMessage(message) {
+      return new Promise((resolve) => {
+        events.runtimeMessage.listeners[0](message, {}, resolve);
+      });
+    },
+    async settleEvents() {
+      await Promise.resolve();
+      await new Promise((resolve) => setImmediate(resolve));
+    },
+  };
+}
+
+test("worker stops the sole active session when stop comes from another tab", async () => {
+  const worker = loadServiceWorker();
+  await worker.sendMessage({
+    type: "capture:start",
+    tabId: 7,
+    pageUrl: "https://site.test/watch",
+    pageTitle: "Video",
+  });
+  worker.events.beforeRequest.listeners[0]({
+    tabId: 7,
+    requestId: "r1",
+    url: "https://cdn.test/a.m3u8",
+    method: "GET",
+    type: "media",
+  });
+  worker.events.headersReceived.listeners[0]({
+    tabId: 7,
+    requestId: "r1",
+    url: "https://cdn.test/a.m3u8",
+    method: "GET",
+    responseHeaders: [],
+  });
+  await worker.settleEvents();
+  assert.equal(
+    (await worker.sendMessage({type: "capture:list", tabId: 7})).candidates
+      .length,
+    1,
+  );
+
+  const stopped = await worker.sendMessage({type: "capture:stop", tabId: 8});
+  assert.equal(stopped.ok, true);
+  const afterStop = await worker.sendMessage({type: "capture:list", tabId: 7});
+  assert.equal(afterStop.ok, true);
+  assert.equal(afterStop.candidates.length, 0);
+  const stoppedAgain = await worker.sendMessage({
+    type: "capture:stop",
+    tabId: 8,
+  });
+  assert.equal(stoppedAgain.ok, false);
 });
