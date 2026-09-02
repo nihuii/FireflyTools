@@ -1556,6 +1556,7 @@ class VideoDownloaderToolTests(unittest.TestCase):
         self.assertTrue(options.use_persistent_profile)
         self.assertTrue(options.use_system_chrome)
         self.assertEqual(options.manual_wait_seconds, 33)
+        self.assertIsNone(RecordingSpider.init_kwargs.get("initial_candidate"))
         tool.close()
 
     def test_worker_revalidates_edge_task_and_passes_safe_session_snapshot(self):
@@ -1586,6 +1587,12 @@ class VideoDownloaderToolTests(unittest.TestCase):
         self.assertEqual(snapshot.cookies, ())
         self.assertNotIn("Authorization", snapshot.headers)
         self.assertNotIn("Cookie", snapshot.headers)
+        self.assertIn("initial_candidate", RecordingSpider.init_kwargs)
+        hint = RecordingSpider.init_kwargs["initial_candidate"]
+        self.assertEqual(hint.url, candidate.media_url)
+        self.assertEqual(hint.kind, candidate.kind)
+        self.assertEqual(hint.content_type, candidate.content_type)
+        self.assertEqual(hint.source, "edge")
 
     def test_worker_rejects_expired_edge_task_before_spider_construction(self):
         candidate = parse_candidate_json(json.dumps(valid_edge_message()))

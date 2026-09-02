@@ -22,7 +22,7 @@ from tools.theme_utils import apply_shadow
 from tools.video_crawler.adapters.ytdlp import YtDlpAdapter
 from tools.video_crawler.errors import VideoDownloadError, VideoErrorCode
 from tools.video_crawler.logging_utils import redact_for_display
-from tools.video_crawler.models import SnifferOptions
+from tools.video_crawler.models import MediaCandidate, SnifferOptions
 from tools.video_crawler.sniffer import PageSniffer
 from tools.video_crawler.spider import UniversalVideoSpider
 
@@ -460,6 +460,7 @@ class VideoDownloaderTool(QWidget):
         """
         try:
             session_snapshot = None
+            initial_candidate = None
             if task.get("input_source") == "edge":
                 try:
                     candidate = candidate_from_task_payload(
@@ -485,6 +486,13 @@ class VideoDownloaderTool(QWidget):
                         retryable=False,
                     )
                 session_snapshot = candidate.to_session_snapshot()
+                initial_candidate = MediaCandidate(
+                    url=candidate.media_url,
+                    kind=candidate.kind,
+                    source="edge",
+                    score=100,
+                    content_type=candidate.content_type,
+                )
 
             # 从任务快照重建配置，而不是读取可能已被用户修改的控件。
             sniffer_options = SnifferOptions(
@@ -509,6 +517,11 @@ class VideoDownloaderTool(QWidget):
                 live_record_seconds=task.get("live_record_seconds", 300),
                 sniffer_options=sniffer_options,
                 session_snapshot=session_snapshot,
+                **(
+                    {"initial_candidate": initial_candidate}
+                    if initial_candidate is not None
+                    else {}
+                ),
             )
             output_path = spider.run(task["url"], task["name"])
             return {

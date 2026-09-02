@@ -1,10 +1,12 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from tools.video_crawler.adapters.base import VideoDownloadOrchestrator
 from tools.video_crawler.adapters.direct_mp4 import DirectMp4Adapter
 from tools.video_crawler.adapters.hls import HlsAdapter
+from tools.video_crawler.errors import VideoDownloadError, VideoErrorCode
 from tools.video_crawler.models import (
     BrowserSessionSnapshot,
     MediaCandidate,
@@ -187,9 +189,156 @@ class AdapterArchitectureTests(unittest.TestCase):
                 self.assertEqual(headers["Origin"], "https://example.test")
                 self.assertEqual(headers["Accept"], "*/*")
                 self.assertEqual(headers["Accept-Language"], "zh-CN")
-                self.assertEqual(headers["Range"], "bytes=0-")
+                if kind == MediaKind.DIRECT_MP4:
+                    self.assertNotIn("Range", headers)
+                else:
+                    self.assertEqual(headers["Range"], "bytes=0-")
                 self.assertNotIn("Cookie", headers)
                 self.assertNotIn("Authorization", headers)
+
+    def test_edge_candidate_hint_kind_selects_adapter_without_sniffing(self):
+        cases = (
+            (MediaKind.HLS, "application/vnd.apple.mpegurl"),
+            (MediaKind.DIRECT_MP4, "video/mp4"),
+            (MediaKind.DASH, "application/dash+xml"),
+        )
+
+        for kind, content_type in cases:
+            with self.subTest(kind=kind):
+                url = "https://cdn.example.test/captured-media"
+                spider = UniversalVideoSpider(
+                    output_dir=os.path.join("tests", ".tmp"),
+                    temp_dir=os.path.join("tests", ".tmp"),
+                )
+                spider.initial_candidate = MediaCandidate(
+                    url=url,
+                    kind=kind,
+                    source="edge",
+                    score=100,
+                    content_type=content_type,
+                )
+                adapters = [
+                    RecordingAdapter(item.value.lower(), 100, item)
+                    for item in (
+                        MediaKind.HLS,
+                        MediaKind.DIRECT_MP4,
+                        MediaKind.DASH,
+                    )
+                ]
+                orchestrator = VideoDownloadOrchestrator(
+                    adapters=adapters,
+                    candidate_resolver=spider._resolve_candidate,
+                )
+
+                with patch.object(
+                    spider,
+                    "_sniff_real_url",
+                    return_value="https://cdn.example.test/fallback.m3u8",
+                ) as sniff:
+                    result = orchestrator.download(url, "movie")
+
+                selected = next(adapter for adapter in adapters if adapter.kind == kind)
+                self.assertEqual(result, f"{kind.value.lower()}-movie.mp4")
+                self.assertEqual(
+                    selected.download_calls[0][0],
+                    spider.initial_candidate,
+                )
+                sniff.assert_not_called()
+
+    def test_edge_candidate_hint_overrides_conflicting_url_suffix(self):
+        url = "https://cdn.example.test/captured.mpd"
+        hint = MediaCandidate(
+            url=url,
+            kind=MediaKind.DIRECT_MP4,
+            source="edge",
+            score=100,
+            content_type="video/mp4",
+        )
+        spider = UniversalVideoSpider(
+            output_dir=os.path.join("tests", ".tmp"),
+            temp_dir=os.path.join("tests", ".tmp"),
+        )
+        spider.initial_candidate = hint
+        mp4 = RecordingAdapter("mp4", 100, MediaKind.DIRECT_MP4)
+        dash = RecordingAdapter("dash", 100, MediaKind.DASH)
+        orchestrator = VideoDownloadOrchestrator(
+            adapters=[mp4, dash],
+            candidate_resolver=spider._resolve_candidate,
+        )
+
+        result = orchestrator.download(url, "movie")
+
+        self.assertEqual(result, "mp4-movie.mp4")
+        self.assertEqual(mp4.download_calls, [(hint, "movie")])
+        self.assertEqual(dash.download_calls, [])
+
+    def test_edge_candidate_hint_rejects_mismatched_resolve_url(self):
+        spider = UniversalVideoSpider(
+            output_dir=os.path.join("tests", ".tmp"),
+            temp_dir=os.path.join("tests", ".tmp"),
+        )
+        spider.initial_candidate = MediaCandidate(
+            url="https://cdn.example.test/captured.mp4",
+            kind=MediaKind.DIRECT_MP4,
+            source="edge",
+            score=100,
+            content_type="video/mp4",
+        )
+
+        with self.assertRaises(VideoDownloadError) as raised:
+            spider._resolve_candidate("https://cdn.example.test/tampered.mp4")
+
+        self.assertEqual(
+            raised.exception.code,
+            VideoErrorCode.EDGE_CANDIDATE_INVALID,
+        )
+        self.assertFalse(raised.exception.retryable)
+
+    def test_edge_direct_mp4_drops_nonzero_range_before_adapter(self):
+        url = "https://cdn.example.test/video.mp4"
+        snapshot = BrowserSessionSnapshot(
+            user_agent="Edge UA",
+            referer="https://example.test/watch",
+            origin="https://example.test",
+            headers={
+                "Accept": "video/mp4",
+                "Range": "bytes=100-199",
+                "Authorization": "Bearer secret",
+            },
+        )
+        spider = UniversalVideoSpider(
+            output_dir=os.path.join("tests", ".tmp"),
+            temp_dir=os.path.join("tests", ".tmp"),
+            session_snapshot=snapshot,
+        )
+        spider.initial_candidate = MediaCandidate(
+            url=url,
+            kind=MediaKind.DIRECT_MP4,
+            source="edge",
+            score=100,
+            content_type="video/mp4",
+        )
+        adapter = RecordingHeadersAdapter(
+            "mp4",
+            100,
+            MediaKind.DIRECT_MP4,
+            headers_getter=lambda: spider.headers,
+        )
+        orchestrator = VideoDownloadOrchestrator(
+            adapters=[adapter],
+            candidate_resolver=spider._resolve_candidate,
+        )
+
+        orchestrator.download(url, "movie")
+
+        headers = adapter.received_headers[0]
+        self.assertFalse(any(name.lower() == "range" for name in headers))
+        self.assertEqual(headers["User-Agent"], "Edge UA")
+        self.assertEqual(headers["Referer"], "https://example.test/watch")
+        self.assertEqual(headers["Origin"], "https://example.test")
+        self.assertEqual(headers["Accept"], "video/mp4")
+        self.assertNotIn("Cookie", headers)
+        self.assertNotIn("Authorization", headers)
 
     def test_universal_spider_run_uses_orchestrator_and_verifies_output(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -137,6 +137,7 @@ class UniversalVideoSpider:
         resume_enabled=True,
         live_record_seconds=300,
         sniffer_options: SnifferOptions | None = None,
+        initial_candidate: MediaCandidate | None = None,
     ):
         """初始化一次下载会话的目录、并发、续传和嗅探配置。
 
@@ -151,6 +152,7 @@ class UniversalVideoSpider:
         self.log_callback = log_callback
         self.is_high_speed = is_high_speed
         self.session_snapshot = session_snapshot
+        self.initial_candidate = initial_candidate
         self.resume_enabled = resume_enabled
         self.live_record_seconds = int(live_record_seconds)
         self.sniffer_options = sniffer_options or SnifferOptions()
@@ -273,20 +275,41 @@ class UniversalVideoSpider:
         elif candidate.kind == MediaKind.DASH:
             self.log("[*] 判定为 DASH/MPD，启动 DASH 适配器...")
 
+    def _prepare_candidate_headers(self, candidate: MediaCandidate) -> None:
+        """Merge safe session headers and prevent partial whole-file MP4 GETs."""
+        if self.session_snapshot:
+            self.headers = build_download_headers(
+                self.headers,
+                self.session_snapshot,
+                candidate.url,
+            )
+        if candidate.kind == MediaKind.DIRECT_MP4:
+            self.headers = {
+                name: value
+                for name, value in self.headers.items()
+                if name.lower() != "range"
+            }
+
     def _resolve_candidate(self, url: str) -> MediaCandidate:
         """解析直链或网页，返回最终候选及嗅探到的浏览器会话。
 
         网页候选确定后才把浏览器会话合并进下载 Header，避免把某个站点
         的 Cookie 意外带到不相关的直链请求。
         """
+        if self.initial_candidate is not None:
+            if self.initial_candidate.url != url:
+                raise VideoDownloadError(
+                    VideoErrorCode.EDGE_CANDIDATE_INVALID,
+                    "Edge 候选地址与解析地址不一致",
+                    retryable=False,
+                )
+            self._prepare_candidate_headers(self.initial_candidate)
+            self._log_direct_candidate(self.initial_candidate)
+            return self.initial_candidate
+
         direct_candidate = self._classify_direct_url(url)
         if direct_candidate:
-            if self.session_snapshot:
-                self.headers = build_download_headers(
-                    self.headers,
-                    self.session_snapshot,
-                    direct_candidate.url,
-                )
+            self._prepare_candidate_headers(direct_candidate)
             self._log_direct_candidate(direct_candidate)
             return direct_candidate
 
@@ -294,14 +317,9 @@ class UniversalVideoSpider:
         real_url = self._sniff_real_url(url)
         if real_url:
             self.log(f"[+] 嗅探成功，真实地址为: {real_url}")
-            if self.session_snapshot:
-                self.headers = build_download_headers(
-                    self.headers,
-                    self.session_snapshot,
-                    real_url,
-                )
             sniffed_candidate = self._classify_direct_url(real_url)
             if sniffed_candidate:
+                self._prepare_candidate_headers(sniffed_candidate)
                 return sniffed_candidate
         raise VideoDownloadError(
             VideoErrorCode.NO_MEDIA_FOUND,
