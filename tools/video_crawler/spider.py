@@ -264,6 +264,15 @@ class UniversalVideoSpider:
             )
         return None
 
+    def _log_direct_candidate(self, candidate: MediaCandidate) -> None:
+        """Log the adapter path selected for a classified direct candidate."""
+        if candidate.kind == MediaKind.DIRECT_MP4:
+            self.log("[*] 判定为直链 MP4，启动普通下载模块...")
+        elif candidate.kind == MediaKind.HLS:
+            self.log("[*] 判定为 M3U8 流，启动异步切片下载模块...")
+        elif candidate.kind == MediaKind.DASH:
+            self.log("[*] 判定为 DASH/MPD，启动 DASH 适配器...")
+
     def _resolve_candidate(self, url: str) -> MediaCandidate:
         """解析直链或网页，返回最终候选及嗅探到的浏览器会话。
 
@@ -272,12 +281,13 @@ class UniversalVideoSpider:
         """
         direct_candidate = self._classify_direct_url(url)
         if direct_candidate:
-            if direct_candidate.kind == MediaKind.DIRECT_MP4:
-                self.log("[*] 判定为直链 MP4，启动普通下载模块...")
-            elif direct_candidate.kind == MediaKind.HLS:
-                self.log("[*] 判定为 M3U8 流，启动异步切片下载模块...")
-            elif direct_candidate.kind == MediaKind.DASH:
-                self.log("[*] 判定为 DASH/MPD，启动 DASH 适配器...")
+            if self.session_snapshot:
+                self.headers = build_download_headers(
+                    self.headers,
+                    self.session_snapshot,
+                    direct_candidate.url,
+                )
+            self._log_direct_candidate(direct_candidate)
             return direct_candidate
 
         self.log("[*] 判定为网页，启动 Playwright 嗅探真实视频流...")

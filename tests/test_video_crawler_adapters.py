@@ -5,7 +5,11 @@ import unittest
 from tools.video_crawler.adapters.base import VideoDownloadOrchestrator
 from tools.video_crawler.adapters.direct_mp4 import DirectMp4Adapter
 from tools.video_crawler.adapters.hls import HlsAdapter
-from tools.video_crawler.models import MediaCandidate, MediaKind
+from tools.video_crawler.models import (
+    BrowserSessionSnapshot,
+    MediaCandidate,
+    MediaKind,
+)
 from tools.video_downloader import UniversalVideoSpider
 
 
@@ -22,6 +26,17 @@ class RecordingAdapter:
     def download(self, candidate, output_filename):
         self.download_calls.append((candidate, output_filename))
         return f"{self.name}-{output_filename}.mp4"
+
+
+class RecordingHeadersAdapter(RecordingAdapter):
+    def __init__(self, name, priority, kind, headers_getter):
+        super().__init__(name, priority, kind)
+        self.headers_getter = headers_getter
+        self.received_headers = []
+
+    def download(self, candidate, output_filename):
+        self.received_headers.append(dict(self.headers_getter()))
+        return super().download(candidate, output_filename)
 
 
 class FakeOrchestrator:
@@ -122,6 +137,59 @@ class AdapterArchitectureTests(unittest.TestCase):
             candidate = spider._resolve_candidate("https://cdn.example.test/manifest.mpd")
 
             self.assertEqual(candidate.kind, MediaKind.DASH)
+
+    def test_direct_candidates_pass_safe_session_headers_to_all_adapters(self):
+        snapshot = BrowserSessionSnapshot(
+            user_agent="Edge UA",
+            referer="https://example.test/watch",
+            origin="https://example.test",
+            cookies=(
+                {"name": "sid", "value": "secret", "domain": "cdn.example.test"},
+            ),
+            headers={
+                "Accept": "*/*",
+                "Accept-Language": "zh-CN",
+                "Range": "bytes=0-",
+                "Authorization": "Bearer secret",
+                "Cookie": "sid=secret",
+            },
+        )
+        cases = (
+            ("https://cdn.example.test/master.m3u8", MediaKind.HLS),
+            ("https://cdn.example.test/video.mp4", MediaKind.DIRECT_MP4),
+            ("https://cdn.example.test/manifest.mpd", MediaKind.DASH),
+        )
+
+        for url, kind in cases:
+            with self.subTest(kind=kind):
+                spider = UniversalVideoSpider(
+                    output_dir=os.path.join("tests", ".tmp"),
+                    temp_dir=os.path.join("tests", ".tmp"),
+                    session_snapshot=snapshot,
+                )
+                adapter = RecordingHeadersAdapter(
+                    "recording",
+                    priority=100,
+                    kind=kind,
+                    headers_getter=lambda: spider.headers,
+                )
+                orchestrator = VideoDownloadOrchestrator(
+                    adapters=[adapter],
+                    candidate_resolver=spider._resolve_candidate,
+                )
+
+                orchestrator.download(url, "movie")
+
+                self.assertEqual(len(adapter.received_headers), 1)
+                headers = adapter.received_headers[0]
+                self.assertEqual(headers["User-Agent"], "Edge UA")
+                self.assertEqual(headers["Referer"], "https://example.test/watch")
+                self.assertEqual(headers["Origin"], "https://example.test")
+                self.assertEqual(headers["Accept"], "*/*")
+                self.assertEqual(headers["Accept-Language"], "zh-CN")
+                self.assertEqual(headers["Range"], "bytes=0-")
+                self.assertNotIn("Cookie", headers)
+                self.assertNotIn("Authorization", headers)
 
     def test_universal_spider_run_uses_orchestrator_and_verifies_output(self):
         with tempfile.TemporaryDirectory() as temp_dir:

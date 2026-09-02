@@ -11,7 +11,12 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QSizePolicy, QApplication, QDialog)
 from PyQt6.QtCore import pyqtSignal, Qt
 
-from tools.edge_companion.protocol import EdgeProtocolError, parse_candidate_json
+from tools.edge_companion.protocol import (
+    EdgeProtocolError,
+    candidate_from_task_payload,
+    parse_candidate_json,
+    serialize_candidate,
+)
 from tools.edge_companion.ui import EdgeCandidateDialog
 from tools.theme_utils import apply_shadow
 from tools.video_crawler.adapters.ytdlp import YtDlpAdapter
@@ -307,6 +312,10 @@ class VideoDownloaderTool(QWidget):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
+        self._activate_edge_candidate(candidate)
+
+    def _activate_edge_candidate(self, candidate):
+        """Activate a confirmed Edge candidate as the exclusive input source."""
         self._pending_edge_candidate = candidate
         self.url_entry.setText(candidate.media_url)
         self._edge_waiting = False
@@ -382,8 +391,9 @@ class VideoDownloaderTool(QWidget):
 
         # 任务必须保存控件值的快照。若工作线程稍后再读取 UI，用户修改
         # 下一项任务时会悄悄改变已排队任务的并发数或嗅探模式。
+        pending_candidate = self._pending_edge_candidate
         task = {
-            "url": url,
+            "url": pending_candidate.media_url if pending_candidate else url,
             "name": name,
             "save_dir": save_dir,
             "is_high_speed": self.is_high_speed_mode,
@@ -395,10 +405,21 @@ class VideoDownloaderTool(QWidget):
             "sniffer_use_persistent_profile": self.persistent_profile_chk.isChecked(),
             "sniffer_use_system_chrome": self.system_chrome_chk.isChecked(),
             "sniffer_manual_wait_seconds": self.sniff_wait_spin.value(),
+            "input_source": "edge" if pending_candidate else "url",
+            "edge_candidate": (
+                serialize_candidate(pending_candidate)
+                if pending_candidate
+                else None
+            ),
         }
+        if pending_candidate:
+            task.update(
+                sniffer_headless=True,
+                sniffer_use_persistent_profile=False,
+                sniffer_use_system_chrome=False,
+            )
         self._enqueue_task(task)
-        # Only clear after a successful append. Task 5 can snapshot the candidate
-        # into ``task`` above before this cleanup point.
+        # Only clear after the confirmed candidate has been frozen into ``task``.
         self.clear_edge_candidate()
         self.url_entry.clear()
 
@@ -438,6 +459,33 @@ class VideoDownloaderTool(QWidget):
             该方法吞掉下载异常，保证永久工作线程不会因单项失败退出。
         """
         try:
+            session_snapshot = None
+            if task.get("input_source") == "edge":
+                try:
+                    candidate = candidate_from_task_payload(
+                        task.get("edge_candidate")
+                    )
+                except (EdgeProtocolError, TypeError, KeyError) as exc:
+                    raise VideoDownloadError(
+                        VideoErrorCode.EDGE_CANDIDATE_INVALID,
+                        "Edge 候选任务载荷无效",
+                        retryable=False,
+                    ) from exc
+
+                if task.get("url") != candidate.media_url:
+                    raise VideoDownloadError(
+                        VideoErrorCode.EDGE_CANDIDATE_INVALID,
+                        "Edge 候选任务地址与载荷不一致",
+                        retryable=False,
+                    )
+                if candidate.is_expired(self._now()):
+                    raise VideoDownloadError(
+                        VideoErrorCode.EDGE_CANDIDATE_EXPIRED,
+                        "Edge 候选任务已过期，请重新捕获",
+                        retryable=False,
+                    )
+                session_snapshot = candidate.to_session_snapshot()
+
             # 从任务快照重建配置，而不是读取可能已被用户修改的控件。
             sniffer_options = SnifferOptions(
                 headless=task.get("sniffer_headless", True),
@@ -460,6 +508,7 @@ class VideoDownloaderTool(QWidget):
                 resume_enabled=task.get("resume_enabled", True),
                 live_record_seconds=task.get("live_record_seconds", 300),
                 sniffer_options=sniffer_options,
+                session_snapshot=session_snapshot,
             )
             output_path = spider.run(task["url"], task["name"])
             return {

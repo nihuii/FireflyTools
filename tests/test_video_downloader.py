@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import QApplication, QDialog, QLabel, QScrollArea
 from PyQt6.QtCore import Qt
 
 from tests.edge_companion_fixtures import valid_edge_message
-from tools.edge_companion.protocol import parse_candidate_json
+from tools.edge_companion.protocol import parse_candidate_json, serialize_candidate
 from tools.edge_companion.ui import EdgeCandidateDialog
 from tools.video_downloader import (
     UniversalVideoSpider,
@@ -59,6 +59,24 @@ class RecordingEdgeDialog:
 def fixed_edge_now():
     """Return a stable aware UTC time for Edge candidate tests."""
     return datetime(2026, 8, 30, 12, 1, tzinfo=timezone.utc)
+
+
+def complete_task_fixture():
+    """Return a complete queue task using the stable Edge fixture URL."""
+    return {
+        "url": valid_edge_message()["candidate"]["url"],
+        "name": "edge-video",
+        "save_dir": "downloads",
+        "is_high_speed": False,
+        "segment_concurrency": 5,
+        "resume_enabled": True,
+        "use_ytdlp_fallback": False,
+        "live_record_seconds": 300,
+        "sniffer_headless": True,
+        "sniffer_use_persistent_profile": False,
+        "sniffer_use_system_chrome": False,
+        "sniffer_manual_wait_seconds": 25,
+    }
 
 
 class TrackingSpider(UniversalVideoSpider):
@@ -138,11 +156,13 @@ def segment_items(failed_count, total_count):
 
 class RecordingSpider:
     init_kwargs = None
+    run_args = None
 
     def __init__(self, **kwargs):
         type(self).init_kwargs = kwargs
 
     def run(self, url, name):
+        type(self).run_args = (url, name)
         return os.path.join("downloads", f"{name}.mp4")
 
 
@@ -564,7 +584,10 @@ class UniversalVideoSpiderTests(unittest.TestCase):
                         "domain": "cdn.example.test",
                     },
                 ),
-                headers={"Authorization": "Bearer secret"},
+                headers={
+                    "Authorization": "Bearer secret",
+                    "Accept-Language": "zh-CN",
+                },
             ),
         )
 
@@ -579,8 +602,9 @@ class UniversalVideoSpiderTests(unittest.TestCase):
         self.assertEqual(request_headers["User-Agent"], "Browser UA")
         self.assertEqual(request_headers["Referer"], "https://site.example/watch")
         self.assertEqual(request_headers["Origin"], "https://site.example")
-        self.assertEqual(request_headers["Authorization"], "Bearer secret")
-        self.assertEqual(request_headers["Cookie"], "sid=abc")
+        self.assertEqual(request_headers["Accept-Language"], "zh-CN")
+        self.assertNotIn("Authorization", request_headers)
+        self.assertNotIn("Cookie", request_headers)
 
     def test_sniff_selection_is_independent_of_dash_and_mp4_discovery_order(self):
         spider = UniversalVideoSpider(output_dir="downloads", temp_dir="temp")
@@ -643,7 +667,10 @@ class UniversalVideoSpiderTests(unittest.TestCase):
                     cookies=(
                         {"name": "sid", "value": "abc", "domain": "example.test"},
                     ),
-                    headers={"Authorization": "Bearer secret"},
+                    headers={
+                        "Authorization": "Bearer secret",
+                        "Accept-Language": "zh-CN",
+                    },
                 ),
             )
             captured_headers = {}
@@ -668,8 +695,9 @@ class UniversalVideoSpiderTests(unittest.TestCase):
             self.assertEqual(captured_headers["User-Agent"], "Browser UA")
             self.assertEqual(captured_headers["Referer"], "https://example.test/watch")
             self.assertEqual(captured_headers["Origin"], "https://example.test")
-            self.assertEqual(captured_headers["Authorization"], "Bearer secret")
-            self.assertEqual(captured_headers["Cookie"], "sid=abc")
+            self.assertEqual(captured_headers["Accept-Language"], "zh-CN")
+            self.assertNotIn("Authorization", captured_headers)
+            self.assertNotIn("Cookie", captured_headers)
 
     def test_sniff_real_url_rejects_unverified_hls_candidate(self):
         spider = UniversalVideoSpider(output_dir="downloads", temp_dir="temp")
@@ -777,7 +805,10 @@ class UniversalVideoSpiderTests(unittest.TestCase):
                         "domain": "cdn.example.test",
                     },
                 ),
-                headers={"Authorization": "Bearer secret"},
+                headers={
+                    "Authorization": "Bearer secret",
+                    "Accept-Language": "zh-CN",
+                },
             ),
         )
         playlist_url = "https://cdn.example.test/main.m3u8"
@@ -796,8 +827,9 @@ class UniversalVideoSpiderTests(unittest.TestCase):
         self.assertEqual(request_headers["User-Agent"], "Browser UA")
         self.assertEqual(request_headers["Referer"], "https://site.example/watch")
         self.assertEqual(request_headers["Origin"], "https://site.example")
-        self.assertEqual(request_headers["Authorization"], "Bearer secret")
-        self.assertEqual(request_headers["Cookie"], "sid=abc")
+        self.assertEqual(request_headers["Accept-Language"], "zh-CN")
+        self.assertNotIn("Authorization", request_headers)
+        self.assertNotIn("Cookie", request_headers)
 
     def test_m3u8_load_timeout_uses_network_timeout_code(self):
         spider = UniversalVideoSpider(output_dir="downloads", temp_dir="temp")
@@ -1408,6 +1440,40 @@ class VideoDownloaderToolTests(unittest.TestCase):
         self.assertEqual(task["sniffer_manual_wait_seconds"], 25)
         self.tool.task_queue.task_done()
 
+    def test_added_ordinary_task_marks_url_input_without_edge_payload(self):
+        self.tool.url_entry.setText("https://example.invalid/video.mp4")
+        self.tool.name_entry.setText("ordinary-video")
+        self.tool.path_entry.setText("downloads")
+
+        self.tool.add_to_queue()
+        task = self.tool.task_queue.get_nowait()
+
+        self.assertEqual(task["input_source"], "url")
+        self.assertIsNone(task["edge_candidate"])
+        self.tool.task_queue.task_done()
+
+    def test_confirmed_edge_candidate_is_frozen_before_ui_state_clears(self):
+        candidate = parse_candidate_json(json.dumps(valid_edge_message()))
+        self.tool._activate_edge_candidate(candidate)
+        self.tool.name_entry.setText("edge-video")
+        self.tool.path_entry.setText("downloads")
+
+        self.tool.add_to_queue()
+        task = self.tool.task_queue.get_nowait()
+
+        self.assertEqual(task["input_source"], "edge")
+        self.assertEqual(task["url"], candidate.media_url)
+        self.assertEqual(task["edge_candidate"], serialize_candidate(candidate))
+        self.assertTrue(task["sniffer_headless"])
+        self.assertFalse(task["sniffer_use_persistent_profile"])
+        self.assertFalse(task["sniffer_use_system_chrome"])
+        self.assertIsNone(self.tool._pending_edge_candidate)
+        self.assertEqual(
+            task["edge_candidate"],
+            serialize_candidate(candidate),
+        )
+        self.tool.task_queue.task_done()
+
     def test_successful_queue_add_clears_confirmed_edge_candidate(self):
         dialog = RecordingEdgeDialog(accepted=True)
         tool = VideoDownloaderTool(
@@ -1491,6 +1557,102 @@ class VideoDownloaderToolTests(unittest.TestCase):
         self.assertTrue(options.use_system_chrome)
         self.assertEqual(options.manual_wait_seconds, 33)
         tool.close()
+
+    def test_worker_revalidates_edge_task_and_passes_safe_session_snapshot(self):
+        candidate = parse_candidate_json(json.dumps(valid_edge_message()))
+        task = complete_task_fixture()
+        task.update(
+            input_source="edge",
+            edge_candidate=serialize_candidate(candidate),
+        )
+        RecordingSpider.init_kwargs = None
+        RecordingSpider.run_args = None
+        tool = VideoDownloaderTool(
+            start_worker=False,
+            spider_factory=RecordingSpider,
+            now=fixed_edge_now,
+        )
+
+        try:
+            result = tool._execute_task(task)
+        finally:
+            tool.close()
+
+        self.assertTrue(result["success"])
+        self.assertEqual(RecordingSpider.run_args, (candidate.media_url, "edge-video"))
+        snapshot = RecordingSpider.init_kwargs["session_snapshot"]
+        self.assertEqual(snapshot, candidate.to_session_snapshot())
+        self.assertEqual(snapshot.user_agent, "Edge UA")
+        self.assertEqual(snapshot.cookies, ())
+        self.assertNotIn("Authorization", snapshot.headers)
+        self.assertNotIn("Cookie", snapshot.headers)
+
+    def test_worker_rejects_expired_edge_task_before_spider_construction(self):
+        candidate = parse_candidate_json(json.dumps(valid_edge_message()))
+        task = complete_task_fixture()
+        task.update(
+            input_source="edge",
+            edge_candidate=serialize_candidate(candidate),
+        )
+        RecordingSpider.init_kwargs = None
+        tool = VideoDownloaderTool(
+            start_worker=False,
+            spider_factory=RecordingSpider,
+            now=lambda: datetime(2026, 8, 30, 12, 6, tzinfo=timezone.utc),
+        )
+
+        try:
+            result = tool._execute_task(task)
+        finally:
+            tool.close()
+
+        self.assertFalse(result["success"])
+        self.assertEqual(
+            result["error_code"],
+            VideoErrorCode.EDGE_CANDIDATE_EXPIRED.value,
+        )
+        self.assertFalse(result["retryable"])
+        self.assertIsNone(RecordingSpider.init_kwargs)
+
+    def test_worker_rejects_invalid_or_mismatched_edge_task_before_spider(self):
+        candidate = parse_candidate_json(json.dumps(valid_edge_message()))
+        invalid_tasks = []
+
+        invalid_payload_task = complete_task_fixture()
+        invalid_payload_task.update(
+            input_source="edge",
+            edge_candidate={"candidate": "tampered"},
+        )
+        invalid_tasks.append(invalid_payload_task)
+
+        mismatched_url_task = complete_task_fixture()
+        mismatched_url_task.update(
+            input_source="edge",
+            edge_candidate=serialize_candidate(candidate),
+            url="https://cdn.example.test/tampered.m3u8",
+        )
+        invalid_tasks.append(mismatched_url_task)
+
+        for task in invalid_tasks:
+            with self.subTest(task=task):
+                RecordingSpider.init_kwargs = None
+                tool = VideoDownloaderTool(
+                    start_worker=False,
+                    spider_factory=RecordingSpider,
+                    now=fixed_edge_now,
+                )
+                try:
+                    result = tool._execute_task(task)
+                finally:
+                    tool.close()
+
+                self.assertFalse(result["success"])
+                self.assertEqual(
+                    result["error_code"],
+                    VideoErrorCode.EDGE_CANDIDATE_INVALID.value,
+                )
+                self.assertFalse(result["retryable"])
+                self.assertIsNone(RecordingSpider.init_kwargs)
 
     def test_worker_uses_25_second_wait_for_legacy_task_snapshot(self):
         tool = VideoDownloaderTool(

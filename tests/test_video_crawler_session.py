@@ -15,11 +15,22 @@ class BrowserSessionTests(unittest.TestCase):
             referer="https://example.test/watch",
             origin="https://example.test",
             cookies=({"name": "sid", "value": "abc", "domain": "example.test"},),
-            headers={"Authorization": "Bearer secret", "Accept-Language": "zh-CN"},
+            headers={
+                "Authorization": "Bearer secret",
+                "Cookie": "sid=unsafe",
+                "X-Token": "edge-token",
+                "Accept": "application/vnd.apple.mpegurl",
+                "Accept-Language": "zh-CN",
+                "Range": "bytes=0-",
+            },
         )
 
         headers = build_download_headers(
-            base_headers={"User-Agent": "Base UA"},
+            base_headers={
+                "User-Agent": "Base UA",
+                "Authorization": "Bearer base-secret",
+                "Cookie": "base-cookie",
+            },
             snapshot=snapshot,
             target_url="https://cdn.example.test/video.m3u8",
         )
@@ -27,9 +38,12 @@ class BrowserSessionTests(unittest.TestCase):
         self.assertEqual(headers["User-Agent"], "Browser UA")
         self.assertEqual(headers["Referer"], "https://example.test/watch")
         self.assertEqual(headers["Origin"], "https://example.test")
-        self.assertEqual(headers["Authorization"], "Bearer secret")
+        self.assertEqual(headers["Accept"], "application/vnd.apple.mpegurl")
         self.assertEqual(headers["Accept-Language"], "zh-CN")
-        self.assertEqual(headers["Cookie"], "sid=abc")
+        self.assertEqual(headers["Range"], "bytes=0-")
+        self.assertNotIn("Authorization", headers)
+        self.assertNotIn("Cookie", headers)
+        self.assertNotIn("X-Token", headers)
 
     def test_redact_sensitive_text_hides_tokens(self):
         redacted = redact_sensitive_text(
