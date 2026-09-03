@@ -217,13 +217,14 @@ class EdgeCaptureReceiver(QObject):
     def _handle_post(self, handler: BaseHTTPRequestHandler) -> None:
         """Validate and deliver one authenticated POST request."""
         if not self._is_loopback_client(handler.client_address):
+            self._drain_request_body(handler)
             self._send_json(handler, 403, "FORBIDDEN")
             return
 
         with self._state_lock:
             current_tick = self._clock()
             if current_tick < self._auth_blocked_until:
-                self._discard_bounded_body(handler)
+                self._drain_request_body(handler)
                 self._send_json(handler, 429, "AUTH_RATE_LIMITED")
                 return
 
@@ -243,7 +244,7 @@ class EdgeCaptureReceiver(QObject):
                         2 ** (self._auth_failure_count - 3), 30
                     )
                     self._auth_blocked_until = current_tick + blocked_seconds
-            self._discard_bounded_body(handler)
+            self._drain_request_body(handler)
             self._send_json(handler, 401, "UNAUTHORIZED")
             return
 
@@ -261,6 +262,7 @@ class EdgeCaptureReceiver(QObject):
             return
         content_length = int(content_length_text)
         if content_length > MAX_MESSAGE_BYTES:
+            self._drain_request_body(handler, content_length)
             self._send_json(handler, 413, "MESSAGE_TOO_LARGE")
             return
 
@@ -269,6 +271,7 @@ class EdgeCaptureReceiver(QObject):
             content_type_headers[0].split(";", 1)[0].strip().lower()
             != "application/json"
         ):
+            self._drain_request_body(handler, content_length)
             self._send_json(handler, 415, "UNSUPPORTED_MEDIA_TYPE")
             return
 
@@ -294,17 +297,27 @@ class EdgeCaptureReceiver(QObject):
         self._send_json(handler, 202, "ACCEPTED")
 
     @staticmethod
-    def _discard_bounded_body(handler: BaseHTTPRequestHandler) -> None:
-        """Drain a bounded rejected body so Windows can close without a TCP reset."""
-        content_lengths = handler.headers.get_all("Content-Length", [])
-        if len(content_lengths) != 1:
-            return
-        raw_length = content_lengths[0]
-        if not raw_length.isascii() or not raw_length.isdigit():
-            return
-        content_length = int(raw_length)
-        if content_length <= MAX_MESSAGE_BYTES:
-            handler.rfile.read(content_length)
+    def _drain_request_body(
+        handler: BaseHTTPRequestHandler,
+        content_length: int | None = None,
+    ) -> bool:
+        """Discard a known request body in chunks without decoding or retaining it."""
+        if content_length is None:
+            content_lengths = handler.headers.get_all("Content-Length", [])
+            if len(content_lengths) != 1:
+                return False
+            raw_length = content_lengths[0]
+            if not raw_length.isascii() or not raw_length.isdigit():
+                return False
+            content_length = int(raw_length)
+
+        remaining = content_length
+        while remaining:
+            chunk = handler.rfile.read(min(64 * 1024, remaining))
+            if not chunk:
+                return False
+            remaining -= len(chunk)
+        return True
 
     @staticmethod
     def _send_json(

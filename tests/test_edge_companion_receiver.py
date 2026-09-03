@@ -265,15 +265,18 @@ class EdgeCaptureReceiverTests(unittest.TestCase):
         receiver.start()
         self.assertFalse(receiver._is_loopback_client(("192.0.2.1", 1234)))
         receiver._is_loopback_client = lambda _client_address: False
+        payload = json.dumps(valid_edge_message()).encode("utf-8")
 
-        status, _, response = self.request(
-            receiver,
-            body=json.dumps(valid_edge_message()).encode("utf-8"),
-            headers=self.authorized_headers(),
-        )
-
-        self.assertEqual(status, 403)
-        self.assertEqual(response["code"], "FORBIDDEN")
+        for attempt in range(15):
+            with self.subTest(attempt=attempt):
+                status, content_type, response = self.request(
+                    receiver,
+                    body=payload,
+                    headers=self.authorized_headers(),
+                )
+                self.assertEqual(status, 403)
+                self.assertEqual(content_type, "application/json")
+                self.assertEqual(response["code"], "FORBIDDEN")
 
     def test_content_checks_happen_before_json_decode(self):
         receiver = self.make_receiver()
@@ -291,13 +294,34 @@ class EdgeCaptureReceiverTests(unittest.TestCase):
         self.assertEqual(response["code"], "UNSUPPORTED_MEDIA_TYPE")
 
         oversized_body = b"x" * (256 * 1024 + 1)
-        status, _, response = self.request(
+        for attempt in range(15):
+            with self.subTest(attempt=attempt):
+                status, content_type, response = self.request(
+                    receiver,
+                    body=oversized_body,
+                    headers=self.authorized_headers(),
+                )
+                self.assertEqual(status, 413)
+                self.assertEqual(content_type, "application/json")
+                self.assertEqual(response["code"], "MESSAGE_TOO_LARGE")
+
+    def test_malformed_json_returns_structured_code_without_reflection(self):
+        receiver = self.make_receiver()
+        receiver.start()
+        raw_body = b'{"private-raw-fragment":'
+
+        status, content_type, response = self.request(
             receiver,
-            body=oversized_body,
+            body=raw_body,
             headers=self.authorized_headers(),
         )
-        self.assertEqual(status, 413)
-        self.assertEqual(response["code"], "MESSAGE_TOO_LARGE")
+
+        self.assertEqual(status, 400)
+        self.assertEqual(content_type, "application/json")
+        self.assertEqual(response["code"], "INVALID_JSON")
+        response_text = json.dumps(response, ensure_ascii=False)
+        self.assertNotIn("private-raw-fragment", response_text)
+        self.assertNotIn("test-token", response_text)
 
     def test_valid_candidate_requires_accepting_and_emits_once(self):
         receiver = self.make_receiver()
