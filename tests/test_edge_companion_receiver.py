@@ -1,10 +1,12 @@
 from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
+from dataclasses import replace
 import http.client
 import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import tempfile
 import threading
 import unittest
@@ -14,6 +16,7 @@ import uuid
 from PyQt6.QtCore import Qt
 
 from tests.edge_companion_fixtures import valid_edge_message
+import tools.edge_companion.runtime as runtime_module
 from tools.edge_companion.receiver import EdgeCaptureReceiver
 from tools.edge_companion.runtime import (
     RUNTIME_TTL_SECONDS,
@@ -153,6 +156,140 @@ class RuntimeDescriptorTests(unittest.TestCase):
 
             self.assertIs(type(caught.exception), ValueError)
             self.assertNotIn("test-token", str(caught.exception))
+
+    def test_remove_old_token_cannot_delete_a_concurrent_new_descriptor(self):
+        with temporary_directory() as temporary_path:
+            runtime_path = temporary_path / "edge_capture.json"
+            old_descriptor = replace(self.descriptor, token="old-token")
+            new_descriptor = replace(self.descriptor, token="new-token")
+            write_runtime_descriptor(runtime_path, old_descriptor)
+            writer_at_replace = threading.Event()
+            release_writer = threading.Event()
+            remover_started = threading.Event()
+            remover_finished = threading.Event()
+            errors = []
+            remove_results = []
+            real_replace = runtime_module.os.replace
+
+            def controlled_replace(source, destination):
+                if threading.current_thread().name == "new-descriptor-writer":
+                    writer_at_replace.set()
+                    if not release_writer.wait(1):
+                        raise TimeoutError("writer release timed out")
+                return real_replace(source, destination)
+
+            def write_new_descriptor():
+                try:
+                    write_runtime_descriptor(runtime_path, new_descriptor)
+                except Exception as exc:
+                    errors.append(exc)
+
+            def remove_old_descriptor():
+                remover_started.set()
+                try:
+                    remove_results.append(
+                        runtime_module.remove_runtime_descriptor_if_token(
+                            runtime_path, "old-token"
+                        )
+                    )
+                except Exception as exc:
+                    errors.append(exc)
+                finally:
+                    remover_finished.set()
+
+            with mock.patch.object(
+                runtime_module.os, "replace", side_effect=controlled_replace
+            ):
+                writer = threading.Thread(
+                    target=write_new_descriptor,
+                    name="new-descriptor-writer",
+                )
+                writer.start()
+                self.assertTrue(writer_at_replace.wait(1))
+                remover = threading.Thread(
+                    target=remove_old_descriptor,
+                    name="old-descriptor-remover",
+                )
+                remover.start()
+                self.assertTrue(remover_started.wait(1))
+                self.assertFalse(remover_finished.wait(0.05))
+                release_writer.set()
+                writer.join(2)
+                remover.join(2)
+
+            self.assertFalse(writer.is_alive())
+            self.assertFalse(remover.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(remove_results, [False])
+            self.assertEqual(
+                read_runtime_descriptor(
+                    runtime_path,
+                    now=lambda: self.now,
+                    pid_checker=lambda _pid: True,
+                ).token,
+                "new-token",
+            )
+
+    def test_concurrent_writers_use_separate_temporary_files(self):
+        with temporary_directory() as temporary_path:
+            runtime_path = temporary_path / "edge_capture.json"
+            descriptors = tuple(
+                replace(self.descriptor, token=f"writer-{index}")
+                for index in range(2)
+            )
+            start_writers = threading.Event()
+            replace_sources = []
+            replace_sources_lock = threading.Lock()
+            errors = []
+            real_replace = runtime_module.os.replace
+
+            def recording_replace(source, destination):
+                with replace_sources_lock:
+                    replace_sources.append(Path(source).name)
+                return real_replace(source, destination)
+
+            def write_descriptor(descriptor):
+                start_writers.wait(1)
+                try:
+                    write_runtime_descriptor(runtime_path, descriptor)
+                except Exception as exc:
+                    errors.append(exc)
+
+            with mock.patch.object(
+                runtime_module.os, "replace", side_effect=recording_replace
+            ):
+                writers = [
+                    threading.Thread(target=write_descriptor, args=(descriptor,))
+                    for descriptor in descriptors
+                ]
+                for writer in writers:
+                    writer.start()
+                start_writers.set()
+                for writer in writers:
+                    writer.join(2)
+
+            self.assertTrue(all(not writer.is_alive() for writer in writers))
+            self.assertEqual(
+                errors,
+                [],
+                [f"{error!r} caused by {error.__cause__!r}" for error in errors],
+            )
+            self.assertEqual(len(replace_sources), 2)
+            self.assertEqual(len(set(replace_sources)), 2)
+            for source_name in replace_sources:
+                self.assertTrue(source_name.startswith(runtime_path.name + "."))
+                self.assertTrue(source_name.endswith(".tmp"))
+            self.assertEqual(
+                list(temporary_path.glob(runtime_path.name + ".*.tmp")), []
+            )
+            self.assertIn(
+                read_runtime_descriptor(
+                    runtime_path,
+                    now=lambda: self.now,
+                    pid_checker=lambda _pid: True,
+                ).token,
+                {descriptor.token for descriptor in descriptors},
+            )
 
 
 class EdgeCaptureReceiverTests(unittest.TestCase):
@@ -322,6 +459,53 @@ class EdgeCaptureReceiverTests(unittest.TestCase):
         response_text = json.dumps(response, ensure_ascii=False)
         self.assertNotIn("private-raw-fragment", response_text)
         self.assertNotIn("test-token", response_text)
+
+    def test_rejected_truncated_bodies_respond_and_leave_no_handler_thread(self):
+        receiver = self.make_receiver()
+        receiver.start()
+        existing_thread_ids = {thread.ident for thread in threading.enumerate()}
+        handler_threads = set()
+
+        for attempt, authorization, expected_status in (
+            (1, None, 401),
+            (2, "Bearer wrong-token", 401),
+            (3, "Bearer wrong-token", 401),
+            (4, "Bearer wrong-token", 429),
+        ):
+            with self.subTest(attempt=attempt):
+                client = socket.create_connection(receiver.server_address, timeout=1)
+                client.settimeout(0.75)
+                headers = [
+                    "POST / HTTP/1.1",
+                    f"Host: {receiver.server_address[0]}",
+                    "Content-Type: application/json",
+                    "Content-Length: 1024",
+                    "Connection: close",
+                ]
+                if authorization is not None:
+                    headers.append(f"Authorization: {authorization}")
+                request = ("\r\n".join(headers) + "\r\n\r\n").encode("ascii")
+                try:
+                    client.sendall(request)
+                    try:
+                        response = client.recv(4096)
+                    except TimeoutError:
+                        response = b""
+                    handler_threads.update(
+                        thread
+                        for thread in threading.enumerate()
+                        if thread.ident not in existing_thread_ids
+                        and "process_request_thread" in thread.name
+                    )
+                finally:
+                    client.close()
+                self.assertIn(f" {expected_status} ".encode("ascii"), response)
+
+        self.assertTrue(handler_threads)
+        receiver.stop()
+        for thread in handler_threads:
+            thread.join(1)
+        self.assertTrue(all(not thread.is_alive() for thread in handler_threads))
 
     def test_valid_candidate_requires_accepting_and_emits_once(self):
         receiver = self.make_receiver()

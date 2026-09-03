@@ -1,11 +1,15 @@
 """Discover a live Edge capture receiver through a local runtime descriptor."""
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import errno
+import hmac
 import json
 import os
 from pathlib import Path
+import tempfile
+import threading
 from typing import Callable
 
 
@@ -18,6 +22,8 @@ _DESCRIPTOR_FIELDS = {
     "protocol_version",
     "expires_at",
 }
+_PROCESS_LOCKS_GUARD = threading.Lock()
+_PROCESS_LOCKS = {}
 
 
 @dataclass(frozen=True)
@@ -63,26 +69,134 @@ def default_runtime_path() -> Path:
     )
 
 
+@contextmanager
+def _runtime_descriptor_lock(path: Path):
+    """Hold the stable same-directory OS lock for one descriptor operation."""
+    lock_path = path.with_name(path.name + ".lock")
+    lock_key = os.path.normcase(os.path.abspath(lock_path))
+    with _PROCESS_LOCKS_GUARD:
+        process_lock = _PROCESS_LOCKS.setdefault(lock_key, threading.RLock())
+
+    process_lock.acquire()
+    lock_handle = None
+    acquired = False
+    try:
+        try:
+            lock_handle = lock_path.open("a+b")
+        except OSError as exc:
+            raise RuntimeError("无法打开运行时描述文件锁") from exc
+        if os.name == "nt":
+            import msvcrt
+
+            lock_handle.seek(0, os.SEEK_END)
+            if lock_handle.tell() == 0:
+                lock_handle.write(b"\0")
+                lock_handle.flush()
+            lock_handle.seek(0)
+            try:
+                msvcrt.locking(lock_handle.fileno(), msvcrt.LK_LOCK, 1)
+            except OSError as exc:
+                raise RuntimeError("无法获取运行时描述文件锁") from exc
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            except OSError as exc:
+                raise RuntimeError("无法获取运行时描述文件锁") from exc
+        acquired = True
+        yield
+    finally:
+        if acquired:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    lock_handle.seek(0)
+                    msvcrt.locking(lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+        if lock_handle is not None:
+            lock_handle.close()
+        process_lock.release()
+
+
 def write_runtime_descriptor(path: Path, descriptor: RuntimeDescriptor) -> None:
     """Atomically replace ``path`` with ``descriptor`` encoded as UTF-8 JSON."""
     runtime_path = Path(path)
-    temporary_path = runtime_path.with_name(runtime_path.name + ".tmp")
+    temporary_path = None
+    file_descriptor = None
     try:
         runtime_path.parent.mkdir(parents=True, exist_ok=True)
         serialized = json.dumps(
             descriptor.to_dict(), ensure_ascii=False, separators=(",", ":")
         )
-        with temporary_path.open("w", encoding="utf-8", newline="\n") as handle:
-            handle.write(serialized)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary_path, runtime_path)
+        with _runtime_descriptor_lock(runtime_path):
+            file_descriptor, temporary_name = tempfile.mkstemp(
+                prefix=runtime_path.name + ".",
+                suffix=".tmp",
+                dir=runtime_path.parent,
+            )
+            temporary_path = Path(temporary_name)
+            raw_handle = os.fdopen(
+                file_descriptor,
+                "w",
+                encoding="utf-8",
+                newline="\n",
+            )
+            file_descriptor = None
+            with raw_handle as handle:
+                handle.write(serialized)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, runtime_path)
     except OSError as exc:
-        try:
-            temporary_path.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise RuntimeError("无法写入运行时描述文件") from exc
+    finally:
+        if file_descriptor is not None:
+            try:
+                os.close(file_descriptor)
+            except OSError:
+                pass
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def remove_runtime_descriptor_if_token(path: Path, token: str) -> bool:
+    """Remove ``path`` under its OS lock only when its token still matches."""
+    runtime_path = Path(path)
+    if not runtime_path.parent.is_dir() or not isinstance(token, str):
+        return False
+    with _runtime_descriptor_lock(runtime_path):
+        try:
+            raw_descriptor = json.loads(runtime_path.read_text(encoding="utf-8"))
+            descriptor_token = raw_descriptor.get("token")
+        except (AttributeError, json.JSONDecodeError, OSError, UnicodeError):
+            return False
+        if not isinstance(descriptor_token, str):
+            return False
+        try:
+            matches = hmac.compare_digest(
+                descriptor_token.encode("utf-8"), token.encode("utf-8")
+            )
+        except UnicodeError:
+            return False
+        if not matches:
+            return False
+        try:
+            runtime_path.unlink()
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise RuntimeError("无法删除运行时描述文件") from exc
+        return True
 
 
 def pid_is_alive(pid: int) -> bool:

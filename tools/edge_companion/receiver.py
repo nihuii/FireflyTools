@@ -24,8 +24,15 @@ from tools.edge_companion.runtime import (
     RUNTIME_TTL_SECONDS,
     RuntimeDescriptor,
     default_runtime_path,
+    remove_runtime_descriptor_if_token,
     write_runtime_descriptor,
 )
+
+
+_DRAIN_TIMEOUT_SECONDS = 0.25
+_MAX_DRAIN_BYTES = MAX_MESSAGE_BYTES + 1
+_BODY_READ_TIMEOUT_SECONDS = 2.0
+_DRAIN_CHUNK_BYTES = 64 * 1024
 
 
 class EdgeCaptureReceiver(QObject):
@@ -122,7 +129,10 @@ class EdgeCaptureReceiver(QObject):
                 self._thread = None
                 self._token = None
                 server.server_close()
-                self._delete_own_descriptor(token)
+                try:
+                    remove_runtime_descriptor_if_token(self._runtime_path, token)
+                except RuntimeError:
+                    pass
                 raise
 
         self.status_changed.emit("未连接", "接收器已启动，等待用户授权捕获。")
@@ -148,7 +158,10 @@ class EdgeCaptureReceiver(QObject):
                 if thread is not None:
                     thread.join(timeout=2)
                 if token is not None:
-                    self._delete_own_descriptor(token)
+                    try:
+                        remove_runtime_descriptor_if_token(self._runtime_path, token)
+                    except RuntimeError:
+                        pass
                 self._server = None
                 self._thread = None
                 self._token = None
@@ -156,26 +169,6 @@ class EdgeCaptureReceiver(QObject):
                     self._accepting = False
                     self._auth_failure_count = 0
                     self._auth_blocked_until = 0.0
-
-    def _delete_own_descriptor(self, token: str) -> None:
-        """Delete the descriptor only when it still contains ``token``."""
-        try:
-            raw_descriptor = json.loads(
-                self._runtime_path.read_text(encoding="utf-8")
-            )
-            descriptor_token = raw_descriptor.get("token")
-        except (AttributeError, json.JSONDecodeError, OSError, UnicodeError):
-            return
-        if not isinstance(descriptor_token, str) or not hmac.compare_digest(
-            descriptor_token.encode("utf-8"), token.encode("utf-8")
-        ):
-            return
-        try:
-            self._runtime_path.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError:
-            pass
 
     @staticmethod
     def _is_loopback_client(client_address) -> bool:
@@ -217,15 +210,15 @@ class EdgeCaptureReceiver(QObject):
     def _handle_post(self, handler: BaseHTTPRequestHandler) -> None:
         """Validate and deliver one authenticated POST request."""
         if not self._is_loopback_client(handler.client_address):
-            self._drain_request_body(handler)
             self._send_json(handler, 403, "FORBIDDEN")
+            self._drain_request_body(handler)
             return
 
         with self._state_lock:
             current_tick = self._clock()
             if current_tick < self._auth_blocked_until:
-                self._drain_request_body(handler)
                 self._send_json(handler, 429, "AUTH_RATE_LIMITED")
+                self._drain_request_body(handler)
                 return
 
         authorization_headers = handler.headers.get_all("Authorization", [])
@@ -244,8 +237,8 @@ class EdgeCaptureReceiver(QObject):
                         2 ** (self._auth_failure_count - 3), 30
                     )
                     self._auth_blocked_until = current_tick + blocked_seconds
-            self._drain_request_body(handler)
             self._send_json(handler, 401, "UNAUTHORIZED")
+            self._drain_request_body(handler)
             return
 
         with self._state_lock:
@@ -262,8 +255,8 @@ class EdgeCaptureReceiver(QObject):
             return
         content_length = int(content_length_text)
         if content_length > MAX_MESSAGE_BYTES:
-            self._drain_request_body(handler, content_length)
             self._send_json(handler, 413, "MESSAGE_TOO_LARGE")
+            self._drain_request_body(handler, content_length)
             return
 
         content_type_headers = handler.headers.get_all("Content-Type", [])
@@ -271,11 +264,25 @@ class EdgeCaptureReceiver(QObject):
             content_type_headers[0].split(";", 1)[0].strip().lower()
             != "application/json"
         ):
-            self._drain_request_body(handler, content_length)
             self._send_json(handler, 415, "UNSUPPORTED_MEDIA_TYPE")
+            self._drain_request_body(handler, content_length)
             return
 
-        raw_message = handler.rfile.read(content_length)
+        previous_timeout = handler.connection.gettimeout()
+        try:
+            handler.connection.settimeout(_BODY_READ_TIMEOUT_SECONDS)
+            raw_message = handler.rfile.read(content_length)
+        except (OSError, TimeoutError):
+            self._send_json(handler, 400, "INVALID_JSON")
+            return
+        finally:
+            try:
+                handler.connection.settimeout(previous_timeout)
+            except OSError:
+                pass
+        if len(raw_message) != content_length:
+            self._send_json(handler, 400, "INVALID_JSON")
+            return
         try:
             message_text = raw_message.decode("utf-8")
         except UnicodeDecodeError:
@@ -311,13 +318,30 @@ class EdgeCaptureReceiver(QObject):
                 return False
             content_length = int(raw_length)
 
-        remaining = content_length
-        while remaining:
-            chunk = handler.rfile.read(min(64 * 1024, remaining))
-            if not chunk:
-                return False
-            remaining -= len(chunk)
-        return True
+        if content_length < 0:
+            return False
+
+        remaining = min(content_length, _MAX_DRAIN_BYTES)
+        deadline = time.monotonic() + _DRAIN_TIMEOUT_SECONDS
+        previous_timeout = handler.connection.gettimeout()
+        try:
+            while remaining:
+                time_left = deadline - time.monotonic()
+                if time_left <= 0:
+                    return False
+                handler.connection.settimeout(time_left)
+                chunk = handler.rfile.read(min(_DRAIN_CHUNK_BYTES, remaining))
+                if not chunk:
+                    return False
+                remaining -= len(chunk)
+            return content_length <= _MAX_DRAIN_BYTES
+        except (OSError, TimeoutError):
+            return False
+        finally:
+            try:
+                handler.connection.settimeout(previous_timeout)
+            except OSError:
+                pass
 
     @staticmethod
     def _send_json(
@@ -337,5 +361,7 @@ class EdgeCaptureReceiver(QObject):
             handler.end_headers()
             if handler.command != "HEAD":
                 handler.wfile.write(body)
+            handler.wfile.flush()
+            handler.close_connection = True
         except OSError:
             pass
