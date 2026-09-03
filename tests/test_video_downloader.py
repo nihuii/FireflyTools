@@ -186,6 +186,30 @@ class GenericFailureSpider:
         raise RuntimeError("unexpected boom")
 
 
+class SensitiveStructuredFailureSpider:
+    def __init__(self, **kwargs):
+        pass
+
+    def run(self, url, name):
+        raise VideoDownloadError(
+            VideoErrorCode.HTTP_FORBIDDEN,
+            "request failed https://cdn.example.test/video.m3u8?token=secret&quality=hd "
+            "Authorization: Bearer hidden",
+            retryable=False,
+        )
+
+
+class SensitiveGenericFailureSpider:
+    def __init__(self, **kwargs):
+        pass
+
+    def run(self, url, name):
+        raise RuntimeError(
+            "request failed https://cdn.example.test/video.mp4?token=secret&quality=hd "
+            "Authorization: Bearer hidden"
+        )
+
+
 class NoMediaFailureSpider:
     def __init__(self, **kwargs):
         pass
@@ -1108,6 +1132,70 @@ class VideoDownloaderToolTests(unittest.TestCase):
         finally:
             tool.close()
 
+    def test_confirmed_candidate_button_clears_without_reading_clipboard_again(self):
+        reads = []
+        dialog = RecordingEdgeDialog(accepted=True)
+        tool = VideoDownloaderTool(
+            start_worker=False,
+            clipboard_getter=lambda: reads.append(True)
+            or json.dumps(valid_edge_message()),
+            edge_dialog_factory=lambda candidate, parent: dialog.bind(candidate),
+            now=fixed_edge_now,
+        )
+        try:
+            tool.edge_paste_btn.click()
+
+            self.assertEqual(tool.edge_paste_btn.text(), "清除 Edge 候选")
+            self.assertEqual(reads, [True])
+
+            tool.edge_paste_btn.click()
+
+            self.assertEqual(reads, [True])
+            self.assertIsNone(tool._pending_edge_candidate)
+            self.assertEqual(tool.edge_paste_btn.text(), "粘贴 Edge 候选")
+            self.assertEqual(tool.url_entry.text(), "")
+            self.assertEqual(tool.edge_status_label.text(), "未连接")
+            self.assertEqual(tool.edge_wait_btn.text(), "等待 Edge 捕获")
+            self.assertTrue(tool.edge_wait_btn.isEnabled())
+            self.assertTrue(tool.visible_sniff_chk.isEnabled())
+            self.assertTrue(tool.persistent_profile_chk.isEnabled())
+            self.assertTrue(tool.system_chrome_chk.isEnabled())
+            self.assertTrue(tool.sniff_wait_spin.isEnabled())
+
+            with patch("tools.video_downloader.QMessageBox.warning") as warning:
+                tool.add_to_queue()
+
+            self.assertEqual(tool.task_queue.qsize(), 0)
+            warning.assert_called_once()
+        finally:
+            tool.close()
+
+    def test_clear_candidate_button_preserves_manually_edited_url(self):
+        reads = []
+        dialog = RecordingEdgeDialog(accepted=True)
+        tool = VideoDownloaderTool(
+            start_worker=False,
+            clipboard_getter=lambda: reads.append(True)
+            or json.dumps(valid_edge_message()),
+            edge_dialog_factory=lambda candidate, parent: dialog.bind(candidate),
+            now=fixed_edge_now,
+        )
+        try:
+            tool.edge_paste_btn.click()
+            tool.url_entry.setText("https://manual.example.test/video.mp4")
+
+            tool.edge_paste_btn.click()
+
+            self.assertEqual(reads, [True])
+            self.assertIsNone(tool._pending_edge_candidate)
+            self.assertEqual(tool.edge_paste_btn.text(), "粘贴 Edge 候选")
+            self.assertEqual(
+                tool.url_entry.text(),
+                "https://manual.example.test/video.mp4",
+            )
+        finally:
+            tool.close()
+
     def test_rejected_paste_preserves_existing_url_and_pending_candidate(self):
         message = valid_edge_message()
         dialog = RecordingEdgeDialog(accepted=True)
@@ -1737,6 +1825,117 @@ class VideoDownloaderToolTests(unittest.TestCase):
         self.assertEqual(result["error"], "unexpected boom")
         self.assertEqual(result["error_code"], VideoErrorCode.UNKNOWN.value)
         self.assertFalse(result["retryable"])
+
+    def test_execute_task_redacts_structured_error_before_result_and_log_boundaries(self):
+        emitted = []
+        tool = VideoDownloaderTool(
+            start_worker=False,
+            spider_factory=SensitiveStructuredFailureSpider,
+        )
+        tool.log_signal.connect(emitted.append)
+        task = {
+            "url": "https://example.invalid/blocked.m3u8",
+            "name": "blocked",
+            "save_dir": "downloads",
+            "is_high_speed": False,
+            "segment_concurrency": 5,
+        }
+
+        try:
+            result = tool._execute_task(task)
+        finally:
+            tool.close()
+
+        self.assertEqual(result["error_code"], VideoErrorCode.HTTP_FORBIDDEN.value)
+        self.assertFalse(result["retryable"])
+        for text in (result["error"], "\n".join(emitted)):
+            self.assertIn("<redacted>", text)
+            self.assertNotIn("secret", text)
+            self.assertNotIn("Bearer hidden", text)
+
+    def test_execute_task_redacts_generic_error_before_result_and_log_boundaries(self):
+        emitted = []
+        tool = VideoDownloaderTool(
+            start_worker=False,
+            spider_factory=SensitiveGenericFailureSpider,
+        )
+        tool.log_signal.connect(emitted.append)
+        task = {
+            "url": "https://example.invalid/error.mp4",
+            "name": "error",
+            "save_dir": "downloads",
+            "is_high_speed": False,
+            "segment_concurrency": 5,
+        }
+
+        try:
+            result = tool._execute_task(task)
+        finally:
+            tool.close()
+
+        self.assertEqual(result["error_code"], VideoErrorCode.UNKNOWN.value)
+        self.assertFalse(result["retryable"])
+        for text in (result["error"], "\n".join(emitted)):
+            self.assertIn("<redacted>", text)
+            self.assertNotIn("secret", text)
+            self.assertNotIn("Bearer hidden", text)
+
+    def test_ytdlp_fallback_redacts_adapter_error_before_result_and_log_boundaries(self):
+        emitted = []
+        tool = VideoDownloaderTool(
+            start_worker=False,
+            spider_factory=NoMediaFailureSpider,
+        )
+        tool.log_signal.connect(emitted.append)
+        task = {
+            "url": "https://example.invalid/watch",
+            "name": "fallback",
+            "save_dir": "downloads",
+            "is_high_speed": False,
+            "segment_concurrency": 5,
+            "use_ytdlp_fallback": True,
+        }
+        sensitive_error = VideoDownloadError(
+            VideoErrorCode.HTTP_FORBIDDEN,
+            "adapter failed https://cdn.example.test/video.mp4?token=secret "
+            "Authorization: Bearer hidden",
+            retryable=True,
+        )
+
+        try:
+            with patch("tools.video_downloader.YtDlpAdapter") as adapter_class:
+                adapter_class.return_value.download.side_effect = sensitive_error
+                result = tool._execute_task(task)
+        finally:
+            tool.close()
+
+        self.assertEqual(result["error_code"], VideoErrorCode.HTTP_FORBIDDEN.value)
+        self.assertTrue(result["retryable"])
+        for text in (result["error"], "\n".join(emitted)):
+            self.assertIn("<redacted>", text)
+            self.assertNotIn("secret", text)
+            self.assertNotIn("Bearer hidden", text)
+
+    def test_batch_summary_redacts_legacy_result_error_at_final_boundary(self):
+        summary, details = VideoDownloaderTool.format_batch_results(
+            [
+                {
+                    "task": {"name": "legacy"},
+                    "success": False,
+                    "error": (
+                        "failed https://cdn.example.test/video.m3u8?token=secret "
+                        "Authorization: Bearer hidden"
+                    ),
+                    "error_code": VideoErrorCode.UNKNOWN.value,
+                    "retryable": False,
+                }
+            ]
+        )
+
+        self.assertIn("失败 1 个", summary)
+        self.assertIn("<redacted>", details)
+        self.assertNotIn("secret", details)
+        self.assertNotIn("Bearer hidden", details)
 
     def test_batch_summary_suggests_network_checks_for_timeout(self):
         summary, details = VideoDownloaderTool.format_batch_results(

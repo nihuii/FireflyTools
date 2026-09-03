@@ -1,10 +1,11 @@
 # FireflyTools Edge 辅助视频捕获
 
-这个扩展用于一种受限场景：视频能在用户自己的普通 Microsoft Edge 中播放，但站点限制 Playwright 自动化浏览器。它只在用户明确授权后观察当前选中标签页的媒体请求，并把经过约束的候选 JSON 通过剪贴板交给本机 FireflyTools；这不是 stealth、自动化伪装或人机验证绕过方案。
+这个扩展用于一种受限场景：视频能在用户自己的普通 Microsoft Edge 中播放，但站点限制 Playwright 自动化浏览器。它只在用户明确授权后接受当前选中标签页的媒体候选，并把经过约束的候选 JSON 通过剪贴板交给本机 FireflyTools；这不是 stealth、自动化伪装或人机验证绕过方案。
 
 ## 安全、隐私与功能边界
 
-- 扩展不读取、不保存、不传输 `Cookie` 或 `Authorization`；它不使用 blocking webRequest、不修改页面，也不代替用户或绕过人机验证。
+- 用户点击 Start/“开始捕获”后，Edge 权限弹窗请求 `http://*/*` 与 `https://*/*`，即全部 HTTP(S) 源的运行时可选 host 权限。权限范围是全 HTTP(S) 源；捕获控制器的逻辑过滤只接受用户选中并开始捕获的单个标签页。用户可随时点击 Stop，也可在扩展管理中撤销 host 权限。
+- webRequest 回调可能接收到请求 Header；代码只保留 `Referer`、`Origin`、`User-Agent`、`Accept`、`Accept-Language`、`Range` 六个安全白名单 Header。`Cookie`、`Authorization` 不保留、不复制，也不转交给 FireflyTools 或剪贴板。扩展不使用 blocking webRequest、不修改页面，也不代替用户或绕过人机验证。
 - 扩展不处理 DRM。检测到受保护内容时，应停止并按不支持处理。
 - 依赖敏感浏览器会话的站点即使能在 Edge 中播放，下载请求仍可能返回 401/403。遇到这种情况，只保留不含敏感值的诊断并失败；不得扩展传输协议，也不得导出 Cookie、Authorization 或其他敏感 Header。
 - 每次候选的有效期为 5 分钟；扩展只捕获用户选择并开始捕获的单个标签页，其他标签页不会加入候选。
@@ -18,13 +19,15 @@
 3. 核对扩展 ID 必须是 `applbmkghgaoadhmmcdnbmebgideiefg`；不一致时停止使用并检查加载目录与 `manifest.json`。
 4. 启动 FireflyTools，打开“视频下载”功能。
 5. 在普通 Microsoft Edge 中通过站点允许的人工安全验证，进入真实播放器。
-6. 点击扩展，为当前标签页“开始捕获”，并在这次用户手势中批准运行时请求的网页/CDN host 权限。
+6. 点击扩展，为当前标签页“开始捕获”；在这次用户手势中，Edge 会请求 `http://*/*` 与 `https://*/*` 全部 HTTP(S) 源的运行时可选 host 权限。批准后，捕获控制器仍只接受当前选中的单个标签页。
 7. 回到页面点击播放。
 8. 在扩展候选中选择一个 HLS、MP4 或 DASH，点击“复制候选 JSON”。
 9. 回到 FireflyTools，点击“粘贴 Edge 候选”，检查不含敏感值的确认框并确认。
 10. 选择名称和输出目录，加入现有下载队列。
 
-候选过期、格式无效或安全校验失败时，FireflyTools 会保留当前安全输入状态并拒绝入队。确认框只展示脱敏后的必要元数据，不应显示原始 token 查询值。
+候选过期、格式无效或安全校验失败时，FireflyTools 会保留当前安全输入状态并拒绝入队。确认框只展示脱敏后的必要元数据，不应显示原始 token 查询值。原始候选 JSON 的 URL 仍可能带有短期 token，不要把原始剪贴板 JSON 提交到 Issue、日志、聊天或仓库。
+
+候选确认后，同一个按钮会从“粘贴 Edge 候选”变为“清除 Edge 候选”。点击它会直接清除候选，不读取剪贴板、不再弹确认框，并恢复普通 URL/Playwright 模式；若目标网址仍是候选媒体 URL，会同时清空，若用户已经手工改成其他 URL，则保留手工输入。
 
 ## 安装依赖与开发测试
 

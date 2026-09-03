@@ -203,7 +203,7 @@ class VideoDownloaderTool(QWidget):
         self.edge_wait_btn.clicked.connect(self.toggle_edge_waiting)
         self.edge_controls_layout.addWidget(self.edge_wait_btn)
         self.edge_paste_btn = QPushButton("粘贴 Edge 候选")
-        self.edge_paste_btn.clicked.connect(self.paste_edge_candidate)
+        self.edge_paste_btn.clicked.connect(self.handle_edge_candidate_action)
         self.edge_controls_layout.addWidget(self.edge_paste_btn)
         self.edge_controls_layout.addStretch()
         options_layout.addLayout(self.edge_controls_layout)
@@ -268,10 +268,18 @@ class VideoDownloaderTool(QWidget):
 
     def clear_edge_candidate(self):
         """Clear exclusive Edge input state and restore Playwright controls."""
+        candidate = self._pending_edge_candidate
+        if candidate is not None and self.url_entry.text() == candidate.media_url:
+            self.url_entry.clear()
         self._pending_edge_candidate = None
+        self.edge_paste_btn.setText("粘贴 Edge 候选")
         self._set_playwright_controls_enabled(True)
         self.edge_wait_btn.setEnabled(True)
-        if self._edge_waiting:
+        if candidate is not None:
+            self._edge_waiting = False
+            self.edge_wait_btn.setText("等待 Edge 捕获")
+            self.edge_status_label.setText("未连接")
+        elif self._edge_waiting:
             self.edge_status_label.setText("等待捕获")
         else:
             self.edge_status_label.setText("未连接")
@@ -314,6 +322,13 @@ class VideoDownloaderTool(QWidget):
 
         self._activate_edge_candidate(candidate)
 
+    def handle_edge_candidate_action(self):
+        """Dispatch the shared Edge button to paste or clear its active candidate."""
+        if self._pending_edge_candidate is not None:
+            self.clear_edge_candidate()
+            return
+        self.paste_edge_candidate()
+
     def _activate_edge_candidate(self, candidate):
         """Activate a confirmed Edge candidate as the exclusive input source."""
         self._pending_edge_candidate = candidate
@@ -321,6 +336,7 @@ class VideoDownloaderTool(QWidget):
         self._edge_waiting = False
         self.edge_wait_btn.setText("等待 Edge 捕获")
         self.edge_wait_btn.setEnabled(False)
+        self.edge_paste_btn.setText("清除 Edge 候选")
         self.edge_status_label.setText("已收到候选")
         self._set_playwright_controls_enabled(False)
 
@@ -536,33 +552,36 @@ class VideoDownloaderTool(QWidget):
                 try:
                     return self._execute_ytdlp_fallback(task)
                 except VideoDownloadError as fallback_error:
-                    self.log_signal.emit(f"\n[X] 错误: {fallback_error}")
+                    safe_error = redact_for_display(str(fallback_error))
+                    self.log_signal.emit(f"\n[X] 错误: {safe_error}")
                     return {
                         "task": task,
                         "success": False,
                         "output_path": "",
-                        "error": str(fallback_error),
+                        "error": safe_error,
                         "error_code": fallback_error.code.value,
                         "retryable": fallback_error.retryable,
                     }
-            self.log_signal.emit(f"\n[X] 错误: {e}")
+            safe_error = redact_for_display(str(e))
+            self.log_signal.emit(f"\n[X] 错误: {safe_error}")
             return {
                 "task": task,
                 "success": False,
                 "output_path": "",
-                "error": str(e),
+                "error": safe_error,
                 "error_code": e.code.value,
                 "retryable": e.retryable,
             }
         except Exception as e:
             # 仅真正未分类的异常落入 UNKNOWN；已知下载失败应在核心层
             # 提前包装为 VideoDownloadError，以便 UI 给出准确建议。
-            self.log_signal.emit(f"\n[X] 错误: {e}")
+            safe_error = redact_for_display(str(e))
+            self.log_signal.emit(f"\n[X] 错误: {safe_error}")
             return {
                 "task": task,
                 "success": False,
                 "output_path": "",
-                "error": str(e),
+                "error": safe_error,
                 "error_code": VideoErrorCode.UNKNOWN.value,
                 "retryable": False,
             }
@@ -645,9 +664,10 @@ class VideoDownloaderTool(QWidget):
                     "可重试" if result.get("retryable", True) else "不建议直接重试"
                 )
                 error_counts[code] = error_counts.get(code, 0) + 1
+                safe_error = redact_for_display(result["error"])
                 detail_lines.append(
                     f"  ✗ {result['task']['name']}: "
-                    f"{result['error']} [{code} / {retry_text}]"
+                    f"{safe_error} [{code} / {retry_text}]"
                 )
             detail_lines.append("")
             detail_lines.append("错误统计:")
