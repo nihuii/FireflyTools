@@ -7,8 +7,10 @@ import os
 from pathlib import Path
 import shutil
 import socket
+import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 import uuid
@@ -506,6 +508,74 @@ class EdgeCaptureReceiverTests(unittest.TestCase):
         for thread in handler_threads:
             thread.join(1)
         self.assertTrue(all(not thread.is_alive() for thread in handler_threads))
+
+    def test_stop_interrupts_an_active_partial_authenticated_request(self):
+        receiver = self.make_receiver()
+        received = []
+        receiver.candidate_received.connect(
+            received.append, Qt.ConnectionType.DirectConnection
+        )
+        receiver.start()
+        existing_thread_ids = {thread.ident for thread in threading.enumerate()}
+        client = socket.create_connection(receiver.server_address, timeout=1)
+        client.settimeout(0.5)
+        request = (
+            "POST / HTTP/1.1\r\n"
+            f"Host: {receiver.server_address[0]}\r\n"
+            "Authorization: Bearer test-token\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {64 * 1024}\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        ).encode("ascii") + b"{"
+
+        try:
+            client.sendall(request)
+            handler_thread = None
+            deadline = time.monotonic() + 1
+            poll_event = threading.Event()
+            while time.monotonic() < deadline and handler_thread is None:
+                frames = sys._current_frames()
+                for thread in threading.enumerate():
+                    if (
+                        thread.ident in existing_thread_ids
+                        or "process_request_thread" not in thread.name
+                    ):
+                        continue
+                    frame = frames.get(thread.ident)
+                    function_names = set()
+                    while frame is not None:
+                        function_names.add(frame.f_code.co_name)
+                        frame = frame.f_back
+                    if "_handle_post" in function_names and "readinto" in function_names:
+                        handler_thread = thread
+                        break
+                if handler_thread is None:
+                    poll_event.wait(0.01)
+
+            self.assertIsNotNone(handler_thread)
+            self.assertTrue(self.runtime_path.exists())
+            stop_started = time.monotonic()
+
+            receiver.stop()
+
+            self.assertLessEqual(time.monotonic() - stop_started, 2.5)
+            self.assertFalse(handler_thread.is_alive())
+            self.assertEqual(
+                getattr(receiver, "_active_connections", {object()}), set()
+            )
+            try:
+                closed_data = client.recv(1)
+                client_closed = closed_data == b""
+            except TimeoutError:
+                client_closed = False
+            except OSError:
+                client_closed = True
+            self.assertTrue(client_closed)
+            self.assertEqual(received, [])
+            self.assertFalse(self.runtime_path.exists())
+        finally:
+            client.close()
 
     def test_valid_candidate_requires_accepting_and_emits_once(self):
         receiver = self.make_receiver()

@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import socket
 import threading
 import time
 from typing import Callable
@@ -60,6 +61,9 @@ class EdgeCaptureReceiver(QObject):
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._lifecycle_lock = threading.RLock()
         self._state_lock = threading.RLock()
+        self._active_condition = threading.Condition()
+        self._active_connections = set()
+        self._stopping = False
         self._server = None
         self._thread = None
         self._token = None
@@ -118,6 +122,8 @@ class EdgeCaptureReceiver(QObject):
             self._server = server
             self._thread = thread
             self._token = token
+            with self._active_condition:
+                self._stopping = False
             with self._state_lock:
                 self._accepting = False
                 self._auth_failure_count = 0
@@ -148,15 +154,20 @@ class EdgeCaptureReceiver(QObject):
         with self._lifecycle_lock:
             if self._server is None:
                 return
+            deadline = time.monotonic() + 2.0
             server = self._server
             thread = self._thread
             token = self._token
+            with self._active_condition:
+                self._stopping = True
             try:
                 server.shutdown()
             finally:
                 server.server_close()
+                self._interrupt_active_connections()
+                self._wait_for_active_connections(deadline)
                 if thread is not None:
-                    thread.join(timeout=2)
+                    thread.join(timeout=max(0.0, deadline - time.monotonic()))
                 if token is not None:
                     try:
                         remove_runtime_descriptor_if_token(self._runtime_path, token)
@@ -169,6 +180,50 @@ class EdgeCaptureReceiver(QObject):
                     self._accepting = False
                     self._auth_failure_count = 0
                     self._auth_blocked_until = 0.0
+
+    @staticmethod
+    def _close_connection(connection) -> None:
+        """Best-effort close one active request socket from the stop thread."""
+        try:
+            connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            connection.close()
+        except OSError:
+            pass
+
+    def _register_active_connection(self, connection) -> bool:
+        """Track a handler socket and reject it immediately while stopping."""
+        with self._active_condition:
+            self._active_connections.add(connection)
+            stopping = self._stopping
+            self._active_condition.notify_all()
+        if stopping:
+            self._close_connection(connection)
+        return not stopping
+
+    def _unregister_active_connection(self, connection) -> None:
+        """Forget a finished handler socket and wake a waiting stop call."""
+        with self._active_condition:
+            self._active_connections.discard(connection)
+            self._active_condition.notify_all()
+
+    def _interrupt_active_connections(self) -> None:
+        """Close a snapshot of active handler sockets to interrupt body reads."""
+        with self._active_condition:
+            connections = tuple(self._active_connections)
+        for connection in connections:
+            self._close_connection(connection)
+
+    def _wait_for_active_connections(self, deadline: float) -> None:
+        """Wait within ``deadline`` for all registered handlers to finish."""
+        with self._active_condition:
+            while self._active_connections:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return
+                self._active_condition.wait(timeout=remaining)
 
     @staticmethod
     def _is_loopback_client(client_address) -> bool:
@@ -185,6 +240,29 @@ class EdgeCaptureReceiver(QObject):
 
         class EdgeCaptureRequestHandler(BaseHTTPRequestHandler):
             """Translate HTTP requests into receiver operations."""
+
+            def setup(self):
+                """Create streams and register this handler's active socket."""
+                self._receiver_registered = False
+                self._receiver_should_handle = False
+                super().setup()
+                self._receiver_registered = True
+                self._receiver_should_handle = receiver._register_active_connection(
+                    self.connection
+                )
+
+            def handle(self):
+                """Handle requests only when registration predates stopping."""
+                if self._receiver_should_handle:
+                    super().handle()
+
+            def finish(self):
+                """Close streams and unregister this handler even after errors."""
+                try:
+                    super().finish()
+                finally:
+                    if self._receiver_registered:
+                        receiver._unregister_active_connection(self.connection)
 
             def do_POST(self):
                 """Process one candidate submission."""
