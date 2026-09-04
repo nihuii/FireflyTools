@@ -37,6 +37,23 @@ _RECEIVER_STATUS = {
 }
 
 
+class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Reject every HTTP redirect instead of creating a follow-up request."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        """Return no redirect request so urllib raises the original HTTP error."""
+        return None
+
+
+def _build_loopback_transport():
+    """Build a transport that ignores environment proxies and redirects."""
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        NoRedirectHandler(),
+    )
+    return opener.open
+
+
 def read_native_message(stream) -> dict | None:
     """Read one size-limited Native Messaging JSON object from ``stream``."""
     prefix = stream.read(4)
@@ -116,6 +133,17 @@ def _receiver_result(status: int) -> tuple[bool, str]:
     return _RECEIVER_STATUS.get(status, (False, "RECEIVER_ERROR"))
 
 
+def _close_response(response, stderr) -> None:
+    """Close an HTTP response without overriding its already known result."""
+    close = getattr(response, "close", None)
+    if not callable(close):
+        return
+    try:
+        close()
+    except Exception:
+        _diagnose(stderr, "RESPONSE_CLOSE_ERROR")
+
+
 def _forward_candidate(
     message: dict,
     *,
@@ -162,33 +190,19 @@ def _forward_candidate(
             status = response.getcode()
         return (request_id, *_receiver_result(status))
     except HTTPError as exc:
-        return (request_id, *_receiver_result(exc.code))
-    except (URLError, OSError) as exc:
-        _diagnose(
-            stderr,
-            f"APP_NOT_RUNNING: {exc}",
-            secrets=(descriptor.token,),
-        )
+        try:
+            return (request_id, *_receiver_result(exc.code))
+        finally:
+            _close_response(exc, stderr)
+    except (URLError, OSError):
+        _diagnose(stderr, "APP_NOT_RUNNING")
         return request_id, False, "APP_NOT_RUNNING"
-    except Exception as exc:
-        _diagnose(
-            stderr,
-            f"RECEIVER_ERROR: {exc}",
-            secrets=(descriptor.token,),
-        )
+    except Exception:
+        _diagnose(stderr, "RECEIVER_ERROR")
         return request_id, False, "RECEIVER_ERROR"
     finally:
         if response is not None:
-            close = getattr(response, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception as exc:
-                    _diagnose(
-                        stderr,
-                        f"RESPONSE_CLOSE_ERROR: {exc}",
-                        secrets=(descriptor.token,),
-                    )
+            _close_response(response, stderr)
 
 
 def run_host(
@@ -209,7 +223,7 @@ def run_host(
     diagnostic_stream = stderr if stderr is not None else sys.stderr
     load_descriptor = descriptor_reader or read_runtime_descriptor
     check_pid = pid_checker or pid_is_alive
-    open_url = urlopen or urllib.request.urlopen
+    open_url = urlopen or _build_loopback_transport()
 
     while True:
         try:

@@ -1,11 +1,14 @@
 import io
 import json
 import struct
+import threading
 import unittest
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
+import urllib.request
 
 from tests.edge_companion_fixtures import valid_edge_message
 from tools.edge_companion.native_host import (
@@ -305,6 +308,142 @@ class NativeHostForwardingTests(unittest.TestCase):
             ],
         )
 
+    def test_default_transport_disables_environment_proxy_and_redirects(self):
+        captured_handlers = []
+
+        class FakeOpener:
+            def open(self, _request, timeout):
+                return FakeResponse(202)
+
+        def build_opener(*handlers):
+            captured_handlers.extend(handlers)
+            return FakeOpener()
+
+        with patch.dict(
+            "os.environ",
+            {"HTTP_PROXY": "http://proxy.invalid:8080"},
+            clear=False,
+        ), patch(
+            "tools.edge_companion.native_host.urllib.request.build_opener",
+            side_effect=build_opener,
+        ), patch(
+            "tools.edge_companion.native_host.urllib.request.urlopen",
+            side_effect=AssertionError("default transport used global urlopen"),
+        ):
+            stdin = io.BytesIO(native_frame(valid_edge_message()))
+            stdout = io.BytesIO()
+            exit_code = run_host(
+                ALLOWED_EXTENSION_ORIGIN,
+                stdin=stdin,
+                stdout=stdout,
+                stderr=io.StringIO(),
+                runtime_path=self.runtime_path,
+                descriptor_reader=lambda _path, **_kwargs: self.descriptor,
+                pid_checker=lambda _pid: True,
+            )
+
+        proxy_handlers = [
+            handler
+            for handler in captured_handlers
+            if isinstance(handler, urllib.request.ProxyHandler)
+        ]
+        redirect_handlers = [
+            handler
+            for handler in captured_handlers
+            if isinstance(handler, urllib.request.HTTPRedirectHandler)
+        ]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(proxy_handlers), 1)
+        self.assertEqual(proxy_handlers[0].proxies, {})
+        self.assertEqual(len(redirect_handlers), 1)
+        self.assertIsNot(type(redirect_handlers[0]), urllib.request.HTTPRedirectHandler)
+        self.assertEqual(decoded_frames(stdout.getvalue())[0]["code"], "ACCEPTED")
+
+    def test_default_transport_never_follows_redirect_or_forwards_secrets(self):
+        redirect_requests = []
+        redirected_requests = []
+
+        class RedirectedHandler(BaseHTTPRequestHandler):
+            def _record(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length)
+                redirected_requests.append(
+                    (self.command, dict(self.headers.items()), body)
+                )
+                self.send_response(202)
+                self.end_headers()
+
+            do_GET = _record
+            do_POST = _record
+
+            def log_message(self, _format, *args):
+                pass
+
+        redirected_server = ThreadingHTTPServer(
+            ("127.0.0.1", 0), RedirectedHandler
+        )
+        redirected_url = (
+            f"http://127.0.0.1:{redirected_server.server_address[1]}"
+            "/external-sink"
+        )
+
+        class RedirectHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length)
+                redirect_requests.append((dict(self.headers.items()), body))
+                self.send_response(302)
+                self.send_header("Location", redirected_url)
+                self.end_headers()
+
+            def log_message(self, _format, *args):
+                pass
+
+        redirect_server = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+        threads = [
+            threading.Thread(target=server.serve_forever, daemon=True)
+            for server in (redirect_server, redirected_server)
+        ]
+        for thread in threads:
+            thread.start()
+        descriptor = RuntimeDescriptor(
+            port=redirect_server.server_address[1],
+            token="redirect-private-token",
+            pid=7654,
+            protocol_version=1,
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+        )
+        stdin = io.BytesIO(native_frame(valid_edge_message()))
+        stdout = io.BytesIO()
+        try:
+            exit_code = run_host(
+                ALLOWED_EXTENSION_ORIGIN,
+                stdin=stdin,
+                stdout=stdout,
+                stderr=io.StringIO(),
+                runtime_path=self.runtime_path,
+                descriptor_reader=lambda _path, **_kwargs: descriptor,
+                pid_checker=lambda _pid: True,
+                timeout=1,
+            )
+        finally:
+            for server in (redirect_server, redirected_server):
+                server.shutdown()
+                server.server_close()
+            for thread in threads:
+                thread.join(1)
+
+        frames = decoded_frames(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(redirect_requests), 1)
+        self.assertEqual(len(redirected_requests), 0)
+        self.assertEqual(len(frames), 1)
+        self.assertFalse(frames[0]["ok"])
+        self.assertEqual(frames[0]["code"], "RECEIVER_ERROR")
+        redirected_exposure = repr(redirected_requests)
+        self.assertNotIn("redirect-private-token", redirected_exposure)
+        self.assertNotIn(valid_edge_message()["request_id"], redirected_exposure)
+
     def test_each_input_frame_is_validated_forwarded_and_acknowledged(self):
         first = valid_edge_message()
         second = valid_edge_message()
@@ -478,7 +617,7 @@ class NativeHostForwardingTests(unittest.TestCase):
             "Authorization: Bearer",
         ):
             self.assertNotIn(secret, exposed)
-        self.assertIn("<redacted>", diagnostics)
+        self.assertEqual(diagnostics, "APP_NOT_RUNNING\n")
 
     def test_receiver_error_body_is_never_read_or_reflected(self):
         private_body = "receiver-private-body"
@@ -532,7 +671,46 @@ class NativeHostForwardingTests(unittest.TestCase):
         exposed = json.dumps(frames, ensure_ascii=False) + diagnostics
         self.assertNotIn("runtime-private-token", exposed)
         self.assertNotIn(cleanup_secret, exposed)
-        self.assertIn("<redacted>", diagnostics)
+        self.assertEqual(diagnostics, "RESPONSE_CLOSE_ERROR\n")
+
+    def test_http_error_is_closed_without_overriding_its_ack(self):
+        error_secret = "http-error-private-secret"
+
+        class CloseErrorHTTPError(HTTPError):
+            def __init__(self):
+                super().__init__(
+                    f"http://127.0.0.1:65534/?token={error_secret}",
+                    409,
+                    "Conflict",
+                    {},
+                    None,
+                )
+                self.close_called = False
+
+            def close(self):
+                self.close_called = True
+                raise OSError(
+                    "Authorization: Bearer runtime-private-token "
+                    f"http://127.0.0.1:65534/?token={error_secret}"
+                )
+
+        http_error = CloseErrorHTTPError()
+
+        def urlopen(_request, timeout):
+            raise http_error
+
+        _, frames, diagnostics = self.run_messages(
+            [valid_edge_message()], urlopen=urlopen
+        )
+
+        self.assertTrue(http_error.close_called)
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0]["code"], "APP_NOT_WAITING")
+        exposed = json.dumps(frames, ensure_ascii=False) + diagnostics
+        self.assertNotIn("65534", exposed)
+        self.assertNotIn("runtime-private-token", exposed)
+        self.assertNotIn(error_secret, exposed)
+        self.assertEqual(diagnostics, "RESPONSE_CLOSE_ERROR\n")
 
 
 class NativeHostMainTests(unittest.TestCase):
