@@ -1,0 +1,11 @@
+[build-system]
+requires=["setuptools>=69"]
+build-backend="setuptools.build_meta"
+[project]
+name="fireflytools-local"
+version="0.1.0"
+requires-python=">=3.11"
+[project.scripts]
+fireflytools-edge-host="tools.edge_companion.native_host:main"
+[tool.setuptools.packages.find]
+include=["tools*"]
