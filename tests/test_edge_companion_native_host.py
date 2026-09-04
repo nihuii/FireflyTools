@@ -4,6 +4,7 @@ import struct
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 from urllib.error import URLError
 
 from tests.edge_companion_fixtures import valid_edge_message
@@ -384,6 +385,55 @@ class NativeHostForwardingTests(unittest.TestCase):
                 self.assertFalse(frames[0]["ok"])
                 self.assertEqual(frames[0]["code"], "APP_NOT_RUNNING")
 
+    def test_default_runtime_path_error_maps_to_app_not_running(self):
+        message = valid_edge_message()
+        stdin = io.BytesIO(native_frame(message))
+        stdout = io.BytesIO()
+        stderr = io.StringIO()
+        calls = []
+
+        def forbidden_call(*args, **kwargs):
+            calls.append((args, kwargs))
+            raise AssertionError("runtime discovery failure reached dependency")
+
+        with patch(
+            "tools.edge_companion.native_host.default_runtime_path",
+            side_effect=RuntimeError(
+                "C:/private/runtime.json?token=runtime-path-private"
+            ),
+        ):
+            try:
+                exit_code = run_host(
+                    ALLOWED_EXTENSION_ORIGIN,
+                    stdin=stdin,
+                    stdout=stdout,
+                    stderr=stderr,
+                    descriptor_reader=forbidden_call,
+                    urlopen=forbidden_call,
+                )
+            except RuntimeError:
+                self.fail("run_host leaked runtime discovery error")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(calls, [])
+        self.assertEqual(
+            decoded_frames(stdout.getvalue()),
+            [
+                {
+                    "type": "ack",
+                    "request_id": message["request_id"],
+                    "ok": False,
+                    "code": "APP_NOT_RUNNING",
+                }
+            ],
+        )
+        exposed = (
+            stdout.getvalue().decode("utf-8", errors="ignore")
+            + stderr.getvalue()
+        )
+        self.assertNotIn("runtime-path-private", exposed)
+        self.assertNotIn("C:/private/runtime.json", exposed)
+
     def test_receiver_statuses_map_to_stable_non_sensitive_ack_codes(self):
         expected = {
             202: (True, "ACCEPTED"),
@@ -445,6 +495,44 @@ class NativeHostForwardingTests(unittest.TestCase):
         exposed = json.dumps(frames, ensure_ascii=False) + diagnostics
         self.assertEqual(frames[0]["code"], "APP_NOT_WAITING")
         self.assertNotIn(private_body, exposed)
+
+    def test_confirmed_receiver_status_survives_response_close_error(self):
+        cleanup_secret = "cleanup-private-secret"
+
+        class CloseErrorResponse(FakeResponse):
+            def close(self):
+                self.closed = True
+                raise OSError(
+                    "Authorization: Bearer runtime-private-token "
+                    f"https://cleanup.invalid/?token={cleanup_secret}"
+                )
+
+        response = CloseErrorResponse(202)
+        try:
+            exit_code, frames, diagnostics = self.run_messages(
+                [valid_edge_message()],
+                urlopen=lambda _request, timeout: response,
+            )
+        except OSError:
+            self.fail("run_host leaked response cleanup error")
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(response.closed)
+        self.assertEqual(
+            frames,
+            [
+                {
+                    "type": "ack",
+                    "request_id": valid_edge_message()["request_id"],
+                    "ok": True,
+                    "code": "ACCEPTED",
+                }
+            ],
+        )
+        exposed = json.dumps(frames, ensure_ascii=False) + diagnostics
+        self.assertNotIn("runtime-private-token", exposed)
+        self.assertNotIn(cleanup_secret, exposed)
+        self.assertIn("<redacted>", diagnostics)
 
 
 class NativeHostMainTests(unittest.TestCase):

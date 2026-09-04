@@ -135,14 +135,14 @@ def _forward_candidate(
         payload, ensure_ascii=False, separators=(",", ":")
     ).encode("utf-8")
 
-    descriptor_path = runtime_path or default_runtime_path()
     try:
+        descriptor_path = runtime_path or default_runtime_path()
         descriptor = descriptor_reader(
             descriptor_path,
             pid_checker=pid_checker,
         )
-    except Exception as exc:
-        _diagnose(stderr, f"APP_NOT_RUNNING: {exc}")
+    except Exception:
+        _diagnose(stderr, "APP_NOT_RUNNING")
         return request_id, False, "APP_NOT_RUNNING"
 
     request = urllib.request.Request(
@@ -181,7 +181,14 @@ def _forward_candidate(
         if response is not None:
             close = getattr(response, "close", None)
             if callable(close):
-                close()
+                try:
+                    close()
+                except Exception as exc:
+                    _diagnose(
+                        stderr,
+                        f"RESPONSE_CLOSE_ERROR: {exc}",
+                        secrets=(descriptor.token,),
+                    )
 
 
 def run_host(
