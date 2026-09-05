@@ -379,6 +379,49 @@ class EdgeCaptureReceiverTests(unittest.TestCase):
             [("未连接", "接收器已启动，等待用户授权捕获。")],
         )
 
+    def test_running_receiver_renews_runtime_descriptor_after_old_ttl(self):
+        receiver = self.make_receiver(renewal_interval_seconds=1.0)
+        receiver.start()
+        server = receiver._server
+        original = read_runtime_descriptor(
+            self.runtime_path,
+            now=lambda: self.now,
+            pid_checker=lambda pid: pid == os.getpid(),
+        )
+
+        self.clock.advance(1.0)
+        self.now += timedelta(seconds=RUNTIME_TTL_SECONDS + 1)
+        server.service_actions()
+
+        renewed = read_runtime_descriptor(
+            self.runtime_path,
+            now=lambda: self.now,
+            pid_checker=lambda pid: pid == os.getpid(),
+        )
+        self.assertEqual(renewed.port, original.port)
+        self.assertEqual(renewed.token, original.token)
+        self.assertEqual(renewed.pid, original.pid)
+        self.assertEqual(renewed.protocol_version, original.protocol_version)
+        self.assertEqual(
+            renewed.expires_at,
+            self.now + timedelta(seconds=RUNTIME_TTL_SECONDS),
+        )
+
+    def test_stopped_receiver_does_not_recreate_descriptor_on_service_action(self):
+        receiver = self.make_receiver(renewal_interval_seconds=1.0)
+        receiver.start()
+        server = receiver._server
+
+        self.clock.advance(1.0)
+        self.now += timedelta(seconds=1)
+        server.service_actions()
+        receiver.stop()
+        self.clock.advance(1.0)
+        self.now += timedelta(seconds=1)
+        server.service_actions()
+
+        self.assertFalse(self.runtime_path.exists())
+
     def test_missing_and_wrong_authorization_are_rejected(self):
         receiver = self.make_receiver()
         receiver.start()

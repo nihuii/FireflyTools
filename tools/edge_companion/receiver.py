@@ -49,6 +49,7 @@ class EdgeCaptureReceiver(QObject):
         token_factory: Callable[[], str] | None = None,
         clock: Callable[[], float] = time.monotonic,
         now: Callable[[], datetime] | None = None,
+        renewal_interval_seconds: float = RUNTIME_TTL_SECONDS / 2,
         parent: QObject | None = None,
     ) -> None:
         """Create a stopped receiver with injectable time and token sources."""
@@ -59,6 +60,7 @@ class EdgeCaptureReceiver(QObject):
         self._token_factory = token_factory or (lambda: secrets.token_urlsafe(32))
         self._clock = clock
         self._now = now or (lambda: datetime.now(timezone.utc))
+        self._renewal_interval_seconds = renewal_interval_seconds
         self._lifecycle_lock = threading.RLock()
         self._state_lock = threading.RLock()
         self._active_condition = threading.Condition()
@@ -67,6 +69,7 @@ class EdgeCaptureReceiver(QObject):
         self._server = None
         self._thread = None
         self._token = None
+        self._last_renewal_tick = None
         self._accepting = False
         self._auth_failure_count = 0
         self._auth_blocked_until = 0.0
@@ -98,7 +101,7 @@ class EdgeCaptureReceiver(QObject):
                 raise RuntimeError("接收器当前时间必须包含时区")
             current = current.astimezone(timezone.utc)
 
-            server = ThreadingHTTPServer(("127.0.0.1", 0), self._make_handler())
+            server = self._make_server()
             server.daemon_threads = True
             port = int(server.server_address[1])
             descriptor = RuntimeDescriptor(
@@ -122,6 +125,7 @@ class EdgeCaptureReceiver(QObject):
             self._server = server
             self._thread = thread
             self._token = token
+            self._last_renewal_tick = self._clock()
             with self._active_condition:
                 self._stopping = False
             with self._state_lock:
@@ -134,6 +138,7 @@ class EdgeCaptureReceiver(QObject):
                 self._server = None
                 self._thread = None
                 self._token = None
+                self._last_renewal_tick = None
                 server.server_close()
                 try:
                     remove_runtime_descriptor_if_token(self._runtime_path, token)
@@ -176,6 +181,7 @@ class EdgeCaptureReceiver(QObject):
                 self._server = None
                 self._thread = None
                 self._token = None
+                self._last_renewal_tick = None
                 with self._state_lock:
                     self._accepting = False
                     self._auth_failure_count = 0
@@ -284,6 +290,51 @@ class EdgeCaptureReceiver(QObject):
                 return
 
         return EdgeCaptureRequestHandler
+
+    def _make_server(self) -> ThreadingHTTPServer:
+        """Build a loopback server that renews the descriptor while serving."""
+        receiver = self
+
+        class EdgeCaptureHTTPServer(ThreadingHTTPServer):
+            def service_actions(self):
+                receiver._renew_runtime_descriptor(self)
+
+        return EdgeCaptureHTTPServer(("127.0.0.1", 0), self._make_handler())
+
+    def _renew_runtime_descriptor(self, server: ThreadingHTTPServer) -> None:
+        """Extend this running server's short-lived discovery lease when due."""
+        with self._active_condition:
+            if self._stopping:
+                return
+        if server is not self._server or self._token is None:
+            return
+        current_tick = self._clock()
+        if (
+            self._last_renewal_tick is not None
+            and current_tick - self._last_renewal_tick
+            < self._renewal_interval_seconds
+        ):
+            return
+        self._last_renewal_tick = current_tick
+        try:
+            current = self._now()
+            if (
+                not isinstance(current, datetime)
+                or current.tzinfo is None
+                or current.utcoffset() is None
+            ):
+                raise ValueError("receiver clock must include a timezone")
+            descriptor = RuntimeDescriptor(
+                port=int(server.server_address[1]),
+                token=self._token,
+                pid=os.getpid(),
+                protocol_version=PROTOCOL_VERSION,
+                expires_at=current.astimezone(timezone.utc)
+                + timedelta(seconds=RUNTIME_TTL_SECONDS),
+            )
+            write_runtime_descriptor(self._runtime_path, descriptor)
+        except Exception:
+            self.status_changed.emit("错误", "无法续租 Edge 捕获连接，请重启应用。")
 
     def _handle_post(self, handler: BaseHTTPRequestHandler) -> None:
         """Validate and deliver one authenticated POST request."""
