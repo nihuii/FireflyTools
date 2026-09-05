@@ -1,6 +1,11 @@
 "use strict";
 
-importScripts("candidate_detector.js", "capture_store.js", "capture_controller.js");
+importScripts(
+  "candidate_detector.js",
+  "capture_store.js",
+  "capture_controller.js",
+  "native_client.js",
+);
 
 const controller = EdgeCaptureController.createCaptureController({
   detector: EdgeCaptureDetector,
@@ -8,6 +13,7 @@ const controller = EdgeCaptureController.createCaptureController({
   now: () => Date.now(),
 });
 const CLEANUP_ALARM = "edge-capture-cleanup";
+const nativeClient = EdgeCaptureNativeClient.createNativeClient();
 
 function persistController() {
   return chrome.storage.session.set({edgeCaptureState: controller.snapshot()});
@@ -86,6 +92,22 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             message.requestId,
           ),
         };
+      case "send_candidate":
+        try {
+          const acknowledgement = await nativeClient.send(message.message);
+          return {
+            ok: acknowledgement.ok === true,
+            code: acknowledgement.code,
+          };
+        } catch (error) {
+          return {
+            ok: false,
+            code:
+              error && typeof error.code === "string"
+                ? error.code
+                : "HOST_NOT_INSTALLED",
+          };
+        }
       default:
         return {ok: false, error: "unsupported_message"};
     }

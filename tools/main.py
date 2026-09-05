@@ -8,6 +8,7 @@ from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QFont, QPainter, QPixmap, QPainterPath, QColor
 
 # 导入工具模块
+from tools.edge_companion.receiver import EdgeCaptureReceiver
 from tools.video_downloader import VideoDownloaderTool
 from tools.video_extractor import VideoExtractorTool
 from tools.keyword_organizer import KeywordOrganizerTool
@@ -125,11 +126,13 @@ class CustomTitleBar(QWidget):
 
 class MediaToolboxApp(QMainWindow):
     """组装五个媒体工具标签页并管理全局壁纸与窗口尺寸。"""
-    def __init__(self):
+    def __init__(self, edge_receiver_factory=EdgeCaptureReceiver):
         """组装无边框主窗口、五个工具页、缩放手柄和壁纸系统。"""
         super().__init__()
         self.resize(850, 700)
         self._close_pending = False
+        self.edge_receiver = edge_receiver_factory()
+        self.edge_receiver.start()
 
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -153,7 +156,10 @@ class MediaToolboxApp(QMainWindow):
         self.size_grip.raise_()
         self._position_size_grip()
 
-        self.notebook.addTab(VideoDownloaderTool(), "视频下载爬虫")
+        self.video_downloader_tool = VideoDownloaderTool(
+            edge_receiver=self.edge_receiver
+        )
+        self.notebook.addTab(self.video_downloader_tool, "视频下载爬虫")
         self.notebook.addTab(VideoExtractorTool(), "视频子目录提取")
         self.notebook.addTab(KeywordOrganizerTool(), "关键字归档")
         self.notebook.addTab(SmartImageResizerTool(), "图片智能裁剪")
@@ -225,6 +231,7 @@ class MediaToolboxApp(QMainWindow):
             event.ignore()
             return
         self._close_pending = False
+        self.edge_receiver.stop()
         super().closeEvent(event)
 
     def _resume_pending_close(self):

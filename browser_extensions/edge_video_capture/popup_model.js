@@ -12,8 +12,15 @@ const EdgeCapturePopupModel = (() => {
     stopped: "捕获已停止。",
     stop_failed: "未找到正在捕获的会话。",
     copied: "已复制所选候选项。",
+    sent: "已发送到 FireflyTools。",
     copy_failed: "复制失败，请重试。",
     select_candidate: "请先选择一个候选项。",
+    send_failed: "发送失败；候选仍可复制。",
+    HOST_NOT_INSTALLED: "Edge 连接组件未安装；请查看安装说明，或使用复制候选 JSON。",
+    APP_NOT_RUNNING: "请先打开 FireflyTools，再点击等待 Edge 捕获。",
+    APP_NOT_WAITING: "FireflyTools 尚未进入等待捕获状态。",
+    UNSUPPORTED_VERSION: "扩展与 FireflyTools 协议版本不一致，请升级对应组件。",
+    TIMEOUT: "连接组件响应超时；候选仍可复制。",
   });
 
   function hostnameFrom(candidate) {

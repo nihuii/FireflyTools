@@ -3,6 +3,7 @@
 (() => {
   const startButton = document.querySelector("#start-button");
   const stopButton = document.querySelector("#stop-button");
+  const sendButton = document.querySelector("#send-button");
   const copyButton = document.querySelector("#copy-button");
   const status = document.querySelector("#status");
   const candidateList = document.querySelector("#candidate-list");
@@ -69,6 +70,23 @@
     renderCandidates(response && response.ok ? response.candidates : []);
   }
 
+  async function selectedProtocolMessage() {
+    if (!activeTab || !Number.isInteger(activeTab.id) || !selectedCandidateId) {
+      showStatus("select_candidate");
+      return null;
+    }
+    const response = await chrome.runtime.sendMessage({
+      type: "capture:protocol",
+      tabId: activeTab.id,
+      candidateId: selectedCandidateId,
+      requestId: crypto.randomUUID(),
+    });
+    if (!response || !response.ok || !response.message) {
+      throw new Error("candidate unavailable");
+    }
+    return response.message;
+  }
+
   startButton.addEventListener("click", async () => {
     let granted = false;
     try {
@@ -114,22 +132,33 @@
     showStatus("stopped");
   });
 
-  copyButton.addEventListener("click", async () => {
-    if (!activeTab || !Number.isInteger(activeTab.id) || !selectedCandidateId) {
-      showStatus("select_candidate");
-      return;
-    }
+  sendButton.addEventListener("click", async () => {
     try {
-      const response = await chrome.runtime.sendMessage({
-        type: "capture:protocol",
-        tabId: activeTab.id,
-        candidateId: selectedCandidateId,
-        requestId: crypto.randomUUID(),
-      });
-      if (!response || !response.ok || !response.message) {
-        throw new Error("candidate unavailable");
+      const message = await selectedProtocolMessage();
+      if (!message) {
+        return;
       }
-      await navigator.clipboard.writeText(JSON.stringify(response.message));
+      const response = await chrome.runtime.sendMessage({
+        type: "send_candidate",
+        message,
+      });
+      if (response && response.ok) {
+        showStatus("sent");
+      } else {
+        showStatus((response && response.code) || "send_failed");
+      }
+    } catch (_error) {
+      showStatus("send_failed");
+    }
+  });
+
+  copyButton.addEventListener("click", async () => {
+    try {
+      const message = await selectedProtocolMessage();
+      if (!message) {
+        return;
+      }
+      await navigator.clipboard.writeText(JSON.stringify(message));
       showStatus("copied");
     } catch (_error) {
       showStatus("copy_failed");

@@ -6,7 +6,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtGui import QCloseEvent, QImage
 from PyQt6.QtTest import QSignalSpy
 from PyQt6.QtWidgets import QApplication, QSizeGrip
@@ -15,13 +15,35 @@ from tools.image_similarity_tool import ImageSimilarityTool
 from tools.main import MediaToolboxApp
 
 
+class FakeEdgeReceiver(QObject):
+    """Record receiver lifecycle calls without binding a real port."""
+
+    candidate_received = pyqtSignal(object)
+    status_changed = pyqtSignal(str, str)
+
+    def __init__(self):
+        super().__init__()
+        self.started = False
+        self.accepting = False
+        self.stopped = False
+
+    def start(self):
+        self.started = True
+
+    def set_accepting(self, value):
+        self.accepting = bool(value)
+
+    def stop(self):
+        self.stopped = True
+
+
 class MediaToolboxAppTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
-        self.window = MediaToolboxApp()
+        self.window = MediaToolboxApp(edge_receiver_factory=FakeEdgeReceiver)
 
     def tearDown(self):
         self.window.close()
@@ -40,6 +62,21 @@ class MediaToolboxAppTests(unittest.TestCase):
         self.assertEqual("图片相似度检测", self.window.notebook.tabText(4))
         self.assertIsInstance(self.window.notebook.widget(4), ImageSimilarityTool)
 
+    def test_main_window_starts_and_injects_one_receiver(self):
+        self.assertTrue(self.window.edge_receiver.started)
+        self.assertIs(
+            self.window.video_downloader_tool._edge_receiver,
+            self.window.edge_receiver,
+        )
+
+    def test_accepted_close_stops_receiver(self):
+        event = QCloseEvent()
+
+        self.window.closeEvent(event)
+
+        self.assertTrue(event.isAccepted())
+        self.assertTrue(self.window.edge_receiver.stopped)
+
     def test_close_waits_for_active_scan_and_requests_cancellation(self):
         """扫描仍在运行时主窗口必须忽略关闭并发出协作取消请求。"""
         tool = self.window.notebook.widget(4)
@@ -53,6 +90,7 @@ class MediaToolboxAppTests(unittest.TestCase):
 
             self.assertFalse(event.isAccepted())
             self.assertTrue(self.window._close_pending)
+            self.assertFalse(self.window.edge_receiver.stopped)
             fake_worker.cancel.assert_called_once_with()
         finally:
             tool.scan_worker = None

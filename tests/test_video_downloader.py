@@ -13,9 +13,10 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtWidgets import QApplication, QDialog, QLabel, QScrollArea
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QObject, Qt, pyqtSignal
 
 from tests.edge_companion_fixtures import valid_edge_message
+from tools.edge_companion.install import HostInstallStatus
 from tools.edge_companion.protocol import parse_candidate_json, serialize_candidate
 from tools.edge_companion.ui import EdgeCandidateDialog
 from tools.video_downloader import (
@@ -59,6 +60,25 @@ class RecordingEdgeDialog:
 def fixed_edge_now():
     """Return a stable aware UTC time for Edge candidate tests."""
     return datetime(2026, 8, 30, 12, 1, tzinfo=timezone.utc)
+
+
+def installed_edge_status():
+    """Return a deterministic installed-host status for UI tests."""
+    return HostInstallStatus(installed=True, detail="")
+
+
+class FakeEdgeReceiver(QObject):
+    """Expose the receiver signal and gate contract without opening a socket."""
+
+    candidate_received = pyqtSignal(object)
+    status_changed = pyqtSignal(str, str)
+
+    def __init__(self):
+        super().__init__()
+        self.accepting_calls = []
+
+    def set_accepting(self, value):
+        self.accepting_calls.append(bool(value))
 
 
 def complete_task_fixture():
@@ -1071,10 +1091,20 @@ class VideoDownloaderToolTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
-        self.tool = VideoDownloaderTool(start_worker=False)
+        self.edge_status_patcher = patch(
+            "tools.video_downloader.get_install_status",
+            return_value=installed_edge_status(),
+        )
+        self.edge_status_patcher.start()
+        self.edge_receiver = FakeEdgeReceiver()
+        self.tool = VideoDownloaderTool(
+            start_worker=False,
+            edge_receiver=self.edge_receiver,
+        )
 
     def tearDown(self):
         self.tool.close()
+        self.edge_status_patcher.stop()
 
     def test_mode_switch_restores_default_concurrency(self):
         self.assertEqual(self.tool.concurrency_spin.value(), 5)
@@ -1101,6 +1131,63 @@ class VideoDownloaderToolTests(unittest.TestCase):
         self.assertEqual(self.tool.edge_wait_btn.text(), "等待 Edge 捕获")
         self.assertEqual(self.tool.edge_paste_btn.text(), "粘贴 Edge 候选")
         self.assertIsNone(self.tool._pending_edge_candidate)
+
+    def test_missing_host_renders_not_installed_and_keeps_clipboard_fallback(self):
+        receiver = FakeEdgeReceiver()
+        tool = VideoDownloaderTool(
+            start_worker=False,
+            edge_receiver=receiver,
+            edge_install_status_getter=lambda: HostInstallStatus(
+                installed=False,
+                detail="missing",
+            ),
+        )
+        try:
+            self.assertEqual(tool.edge_status_label.text(), "未安装")
+            self.assertTrue(tool.edge_paste_btn.isEnabled())
+
+            with patch("tools.video_downloader.QMessageBox.information") as info:
+                tool.edge_wait_btn.click()
+
+            self.assertEqual(receiver.accepting_calls, [])
+            self.assertIn("python -m tools.edge_companion.install install", info.call_args.args[2])
+            self.assertTrue(tool.edge_paste_btn.isEnabled())
+        finally:
+            tool.close()
+
+    def test_wait_button_changes_only_receiver_accepting_gate(self):
+        self.tool.edge_wait_btn.click()
+        self.tool.edge_wait_btn.click()
+
+        self.assertEqual(self.edge_receiver.accepting_calls, [True, False])
+        self.assertEqual(self.tool.edge_status_label.text(), "未连接")
+
+    def test_receiver_status_signals_render_supported_states(self):
+        for state in ("等待捕获", "已收到候选", "错误"):
+            with self.subTest(state=state):
+                self.edge_receiver.status_changed.emit(state, "detail")
+                self.assertEqual(self.tool.edge_status_label.text(), state)
+
+    def test_receiver_candidate_uses_the_confirmation_path(self):
+        dialog = RecordingEdgeDialog(accepted=True)
+        receiver = FakeEdgeReceiver()
+        tool = VideoDownloaderTool(
+            start_worker=False,
+            edge_receiver=receiver,
+            edge_install_status_getter=installed_edge_status,
+            edge_dialog_factory=lambda candidate, parent: dialog.bind(candidate),
+            now=fixed_edge_now,
+        )
+        candidate = parse_candidate_json(json.dumps(valid_edge_message()))
+        try:
+            receiver.candidate_received.emit(candidate)
+
+            self.assertTrue(dialog.shown)
+            self.assertIs(dialog.candidate, candidate)
+            self.assertIs(tool._pending_edge_candidate, candidate)
+            self.assertEqual(tool.edge_status_label.text(), "已收到候选")
+        finally:
+            tool.close()
 
     def test_paste_reads_clipboard_on_click_and_requires_confirmation(self):
         reads = []

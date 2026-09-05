@@ -66,7 +66,8 @@ class EdgeExtensionManifestContractTests(unittest.TestCase):
                     "node --test tests/candidate_detector.test.js "
                     "tests/capture_store.test.js "
                     "tests/capture_controller.test.js "
-                    "tests/popup_model.test.js"
+                    "tests/popup_model.test.js "
+                    "tests/native_client.test.js"
                 )
             },
         )

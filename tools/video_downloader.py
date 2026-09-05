@@ -17,6 +17,7 @@ from tools.edge_companion.protocol import (
     parse_candidate_json,
     serialize_candidate,
 )
+from tools.edge_companion.install import get_install_status
 from tools.edge_companion.ui import EdgeCandidateDialog
 from tools.theme_utils import apply_shadow
 from tools.video_crawler.adapters.ytdlp import YtDlpAdapter
@@ -44,6 +45,8 @@ class VideoDownloaderTool(QWidget):
         spider_factory=UniversalVideoSpider,
         clipboard_getter=None,
         edge_dialog_factory=None,
+        edge_receiver=None,
+        edge_install_status_getter=None,
         now=None,
     ):
         """初始化下载界面并按需启动队列工作线程。
@@ -53,6 +56,8 @@ class VideoDownloaderTool(QWidget):
             spider_factory: 创建爬虫实例的工厂，允许测试注入轻量替身。
             clipboard_getter: 按需读取剪贴板文本的可调用对象。
             edge_dialog_factory: 创建 Edge 候选确认对话框的可调用对象。
+            edge_receiver: 主窗口持有的 Edge 本机候选接收器。
+            edge_install_status_getter: 只读查询连接组件安装状态的函数。
             now: 返回当前带时区时间的可调用对象。
         """
         super().__init__()
@@ -61,6 +66,16 @@ class VideoDownloaderTool(QWidget):
         self._edge_dialog_factory = edge_dialog_factory or (
             lambda candidate, parent: EdgeCandidateDialog(candidate, parent)
         )
+        self._edge_receiver = edge_receiver
+        self._edge_install_status_getter = (
+            edge_install_status_getter or get_install_status
+        )
+        try:
+            self._edge_host_installed = bool(
+                self._edge_install_status_getter().installed
+            )
+        except Exception:
+            self._edge_host_installed = False
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._pending_edge_candidate = None
         self._edge_waiting = False
@@ -197,7 +212,9 @@ class VideoDownloaderTool(QWidget):
         self.edge_controls_layout = QHBoxLayout()
         self.edge_controls_layout.setSpacing(12)
         self.edge_controls_layout.addWidget(QLabel("Edge 捕获:"))
-        self.edge_status_label = QLabel("未连接")
+        self.edge_status_label = QLabel(
+            "未连接" if self._edge_host_installed else "未安装"
+        )
         self.edge_controls_layout.addWidget(self.edge_status_label)
         self.edge_wait_btn = QPushButton("等待 Edge 捕获")
         self.edge_wait_btn.clicked.connect(self.toggle_edge_waiting)
@@ -241,6 +258,14 @@ class VideoDownloaderTool(QWidget):
         self.queue_pop_signal.connect(self.pop_queue_ui)
         self.batch_finished_signal.connect(self.show_batch_results)
 
+        if self._edge_receiver is not None:
+            self._edge_receiver.candidate_received.connect(
+                self._receive_edge_candidate
+            )
+            self._edge_receiver.status_changed.connect(
+                self._update_edge_receiver_status
+            )
+
         self.log_signal.emit("欢迎使用视频爬虫工具！等待添加任务...\n")
 
         if start_worker:
@@ -266,6 +291,41 @@ class VideoDownloaderTool(QWidget):
         ):
             control.setEnabled(enabled)
 
+    def _edge_idle_status(self):
+        """Return the idle label selected by the read-only install check."""
+        return "未连接" if self._edge_host_installed else "未安装"
+
+    def _show_edge_install_help(self):
+        """Keep paste fallback available while showing the explicit install command."""
+        QMessageBox.information(
+            self,
+            "Edge 连接组件",
+            "Edge 连接组件不可用。请在项目目录运行：\n"
+            "python -m tools.edge_companion.install install\n"
+            "仍可使用“粘贴 Edge 候选”作为回退。",
+        )
+
+    def _update_edge_receiver_status(self, state, detail):
+        """Render receiver states delivered on the Qt UI thread."""
+        if state not in {"未连接", "等待捕获", "已收到候选", "错误"}:
+            return
+        if self._pending_edge_candidate is not None and state != "错误":
+            return
+        self.edge_status_label.setText(state)
+        self.edge_status_label.setToolTip(detail if isinstance(detail, str) else "")
+        if state != "等待捕获":
+            self._edge_waiting = False
+            self.edge_wait_btn.setText("等待 Edge 捕获")
+
+    def _receive_edge_candidate(self, candidate):
+        """Stop the one-shot gate and reuse the clipboard confirmation path."""
+        self._edge_waiting = False
+        if self._edge_receiver is not None:
+            self._edge_receiver.set_accepting(False)
+        self.edge_status_label.setText("已收到候选")
+        self.edge_wait_btn.setText("等待 Edge 捕获")
+        self._confirm_edge_candidate(candidate)
+
     def clear_edge_candidate(self):
         """Clear exclusive Edge input state and restore Playwright controls."""
         candidate = self._pending_edge_candidate
@@ -278,22 +338,26 @@ class VideoDownloaderTool(QWidget):
         if candidate is not None:
             self._edge_waiting = False
             self.edge_wait_btn.setText("等待 Edge 捕获")
-            self.edge_status_label.setText("未连接")
+            self.edge_status_label.setText(self._edge_idle_status())
         elif self._edge_waiting:
             self.edge_status_label.setText("等待捕获")
         else:
-            self.edge_status_label.setText("未连接")
+            self.edge_status_label.setText(self._edge_idle_status())
 
     def toggle_edge_waiting(self):
-        """Toggle only the visible placeholder state for future Edge receiving."""
+        """Toggle only the local receiver gate for future Edge candidates."""
         if self._pending_edge_candidate is not None:
             return
+        if not self._edge_host_installed or self._edge_receiver is None:
+            self._show_edge_install_help()
+            return
         self._edge_waiting = not self._edge_waiting
+        self._edge_receiver.set_accepting(self._edge_waiting)
         if self._edge_waiting:
             self.edge_status_label.setText("等待捕获")
             self.edge_wait_btn.setText("停止等待")
         else:
-            self.edge_status_label.setText("未连接")
+            self.edge_status_label.setText(self._edge_idle_status())
             self.edge_wait_btn.setText("等待 Edge 捕获")
 
     def paste_edge_candidate(self):
@@ -308,6 +372,10 @@ class VideoDownloaderTool(QWidget):
             )
             return
 
+        self._confirm_edge_candidate(candidate)
+
+    def _confirm_edge_candidate(self, candidate):
+        """Confirm one validated candidate from clipboard or the receiver."""
         if candidate.is_expired(self._now()):
             QMessageBox.warning(
                 self,

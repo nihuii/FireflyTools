@@ -364,6 +364,11 @@ function chromeEvent() {
     addListener(listener) {
       listeners.push(listener);
     },
+    emit(value) {
+      for (const listener of listeners) {
+        listener(value);
+      }
+    },
   };
 }
 
@@ -376,6 +381,15 @@ function loadServiceWorker() {
     tabRemoved: chromeEvent(),
     runtimeMessage: chromeEvent(),
   };
+  const nativePort = {
+    posted: [],
+    onMessage: chromeEvent(),
+    onDisconnect: chromeEvent(),
+    postMessage(message) {
+      this.posted.push(message);
+    },
+  };
+  const nativeHosts = [];
   const storageState = {};
   const chrome = {
     storage: {
@@ -398,11 +412,21 @@ function loadServiceWorker() {
       onAlarm: events.alarm,
     },
     tabs: {onRemoved: events.tabRemoved},
-    runtime: {onMessage: events.runtimeMessage},
+    runtime: {
+      onMessage: events.runtimeMessage,
+      connectNative(hostName) {
+        nativeHosts.push(hostName);
+        return nativePort;
+      },
+      lastError: null,
+    },
   };
   const context = vm.createContext({
     chrome,
     console,
+    clearTimeout,
+    setTimeout,
+    TextEncoder,
     URL,
   });
   vm.runInContext(
@@ -423,6 +447,8 @@ function loadServiceWorker() {
 
   return {
     events,
+    nativeHosts,
+    nativePort,
     sendMessage(message) {
       return new Promise((resolve) => {
         events.runtimeMessage.listeners[0](message, {}, resolve);
@@ -434,6 +460,40 @@ function loadServiceWorker() {
     },
   };
 }
+
+test("worker sends a selected protocol candidate through the native client", async () => {
+  const worker = loadServiceWorker();
+  const message = {
+    protocol_version: 1,
+    type: "media_candidate",
+    request_id: "send-1",
+    captured_at: "2026-08-30T12:00:00Z",
+    page: {url: "https://site.test/watch", title: "Video"},
+    candidate: {
+      url: "https://cdn.test/a.m3u8",
+      kind: "hls",
+      content_type: "application/vnd.apple.mpegurl",
+      method: "GET",
+      headers: {Referer: "https://site.test/"},
+    },
+    sensitive_headers_included: false,
+  };
+
+  const response = worker.sendMessage({type: "send_candidate", message});
+  await worker.settleEvents();
+  assert.deepEqual(worker.nativeHosts, ["com.fireflytools.video_capture"]);
+  assert.equal(worker.nativePort.posted.length, 1);
+  worker.nativePort.onMessage.emit({
+    type: "ack",
+    request_id: "send-1",
+    ok: true,
+    code: "ACCEPTED",
+  });
+
+  const result = await response;
+  assert.equal(result.ok, true);
+  assert.equal(result.code, "ACCEPTED");
+});
 
 test("worker stops the sole active session when stop comes from another tab", async () => {
   const worker = loadServiceWorker();
