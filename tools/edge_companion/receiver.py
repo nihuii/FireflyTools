@@ -295,7 +295,10 @@ class EdgeCaptureReceiver(QObject):
         receiver = self
 
         class EdgeCaptureHTTPServer(ThreadingHTTPServer):
+            """Run receiver lease maintenance alongside request polling."""
+
             def service_actions(self):
+                """Renew the runtime descriptor when its lease is due."""
                 receiver._renew_runtime_descriptor(self)
 
         return EdgeCaptureHTTPServer(("127.0.0.1", 0), self._make_handler())
