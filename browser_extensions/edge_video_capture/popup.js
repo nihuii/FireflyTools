@@ -88,19 +88,6 @@
   }
 
   startButton.addEventListener("click", async () => {
-    let granted = false;
-    try {
-      granted = await chrome.permissions.request({
-        origins: ["http://*/*", "https://*/*"],
-      });
-    } catch (_error) {
-      granted = false;
-    }
-    if (!granted) {
-      showStatus("permission_denied");
-      return;
-    }
-
     activeTab = await currentTab();
     if (!activeTab || !Number.isInteger(activeTab.id)) {
       return;

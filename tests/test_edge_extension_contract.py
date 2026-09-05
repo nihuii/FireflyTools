@@ -44,12 +44,12 @@ class EdgeExtensionManifestContractTests(unittest.TestCase):
         self.assertNotIn("cookies", manifest["permissions"])
         self.assertNotIn("webRequestBlocking", manifest["permissions"])
         self.assertNotIn("content_scripts", manifest)
-        self.assertNotIn("host_permissions", manifest)
-        self.assertNotIn("optional_permissions", manifest)
         self.assertEqual(
-            manifest["optional_host_permissions"],
+            manifest["host_permissions"],
             ["http://*/*", "https://*/*"],
         )
+        self.assertNotIn("optional_permissions", manifest)
+        self.assertNotIn("optional_host_permissions", manifest)
         self.assertEqual(manifest["key"], EXPECTED_KEY)
 
     def test_package_uses_only_node_test_without_dependencies(self):
@@ -67,6 +67,7 @@ class EdgeExtensionManifestContractTests(unittest.TestCase):
                     "tests/capture_store.test.js "
                     "tests/capture_controller.test.js "
                     "tests/popup_model.test.js "
+                    "tests/popup_interaction.test.js "
                     "tests/native_client.test.js"
                 )
             },
