@@ -324,6 +324,42 @@ class EdgeCompanionInstallerTests(unittest.TestCase):
         self.assertEqual(registry.create_calls, [])
         self.assertEqual(registry.set_calls, [])
 
+    def test_status_ignores_current_path_lookup_after_valid_registration(self):
+        registry = FakeWinreg()
+        self.install_valid_host(registry)
+        alternate_launcher = self.root / "Other" / "alternate-host.exe"
+        alternate_launcher.parent.mkdir()
+        alternate_launcher.write_bytes(b"alternate launcher")
+        registry.create_calls.clear()
+        registry.set_calls.clear()
+
+        for label, current_lookup in (
+            ("different-launcher", str(alternate_launcher)),
+            ("missing-from-path", None),
+        ):
+            with self.subTest(label=label):
+                status = install_module.get_install_status(
+                    winreg_module=registry,
+                    which=lambda command, result=current_lookup: (
+                        result
+                        if command == "fireflytools-edge-host.exe"
+                        else self.fail(f"unexpected launcher lookup: {command}")
+                    ),
+                    environ=self.environment,
+                )
+
+                self.assertEqual(
+                    status,
+                    install_module.HostInstallStatus(
+                        True,
+                        "Edge 连接组件已安装。",
+                        manifest_path=self.manifest_path,
+                        launcher_path=self.launcher_path.resolve(),
+                    ),
+                )
+                self.assertEqual(registry.create_calls, [])
+                self.assertEqual(registry.set_calls, [])
+
     def test_status_reports_unreadable_or_invalid_manifest(self):
         registry = FakeWinreg()
         registry.keys.add(EXPECTED_REGISTRY_KEY)
@@ -362,21 +398,17 @@ class EdgeCompanionInstallerTests(unittest.TestCase):
             ),
         )
 
-    def test_status_rejects_mismatched_origin_paths_and_launcher_types(self):
+    def test_status_rejects_mismatched_origin_and_invalid_launcher_paths(self):
         registry = FakeWinreg()
         self.install_valid_host(registry)
-        alternate_launcher = self.root / "Other" / "other-host.exe"
-        alternate_launcher.parent.mkdir()
-        alternate_launcher.write_bytes(b"other launcher")
         non_exe_launcher = self.root / "Other" / "other-host.cmd"
+        non_exe_launcher.parent.mkdir()
         non_exe_launcher.write_bytes(b"other launcher")
 
         payload_cases = []
         wrong_origin = self.expected_payload()
         wrong_origin["allowed_origins"] = ["chrome-extension://wrong/"]
         payload_cases.append(("wrong-origin", wrong_origin))
-        wrong_launcher = self.expected_payload(alternate_launcher.resolve())
-        payload_cases.append(("wrong-launcher", wrong_launcher))
         nonexistent_launcher = self.expected_payload(self.root / "gone.exe")
         payload_cases.append(("nonexistent-launcher", nonexistent_launcher))
         non_exe_payload = self.expected_payload(non_exe_launcher.resolve())
@@ -449,6 +481,20 @@ class EdgeCompanionInstallerTests(unittest.TestCase):
         self.assertTrue(unrelated_file.exists())
         self.assertTrue(attacker_manifest.exists())
         self.assertTrue(self.manifest_path.parent.exists())
+
+    def test_uninstall_preserves_owned_manifest_directory_when_empty(self):
+        registry = FakeWinreg()
+        self.install_valid_host(registry)
+
+        status = install_module.uninstall_host(
+            winreg_module=registry,
+            environ=self.environment,
+        )
+
+        self.assertEqual(status.detail, "Edge 连接组件已卸载。")
+        self.assertFalse(self.manifest_path.exists())
+        self.assertTrue(self.manifest_path.parent.is_dir())
+        self.assertEqual(list(self.manifest_path.parent.iterdir()), [])
 
     def test_uninstall_is_idempotent_and_does_not_create_directories(self):
         registry = FakeWinreg()

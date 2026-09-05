@@ -304,18 +304,6 @@ def get_install_status(
             launcher_path=resolved_launcher_path,
         )
 
-    current_launcher_path = _find_launcher(which)
-    if (
-        current_launcher_path is not None
-        and current_launcher_path != resolved_launcher_path
-    ):
-        return HostInstallStatus(
-            False,
-            _CONFIG_MISMATCH,
-            manifest_path=expected_manifest_path,
-            launcher_path=resolved_launcher_path,
-        )
-
     return HostInstallStatus(
         True,
         _INSTALLED,
@@ -364,11 +352,6 @@ def uninstall_host(*, winreg_module=None, environ=None) -> HostInstallStatus:
             _UNINSTALL_FAILED,
             manifest_path=manifest_path,
         )
-
-    try:
-        manifest_path.parent.rmdir()
-    except OSError:
-        pass
 
     detail = (
         _UNINSTALLED
