@@ -19,7 +19,12 @@ h1 {
 
 .toolbar {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
+}
+
+#start-reload-button {
+  flex-basis: 100%;
 }
 
 button {
@@ -29,6 +34,11 @@ button {
   color: white;
   cursor: pointer;
   padding: 8px 12px;
+}
+
+button:disabled {
+  cursor: wait;
+  opacity: 0.6;
 }
 
 button.secondary {

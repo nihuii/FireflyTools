@@ -47,6 +47,21 @@ test("userMessage maps popup status codes to concise Chinese copy", () => {
   assert.equal(popupModel.userMessage("unexpected"), "");
 });
 
+test("userMessage maps capture and reload workflow statuses", () => {
+  assert.equal(
+    popupModel.userMessage("capturing_reloaded"),
+    "已开始捕获并重新加载页面。",
+  );
+  assert.equal(
+    popupModel.userMessage("capture_start_failed"),
+    "捕获未能开始，请重试。",
+  );
+  assert.equal(
+    popupModel.userMessage("reload_failed"),
+    "捕获已开始，但页面重新加载失败；请手动刷新或点击播放。",
+  );
+});
+
 test("userMessage maps native host failures while preserving copy fallback guidance", () => {
   assert.equal(
     popupModel.userMessage("HOST_NOT_INSTALLED"),

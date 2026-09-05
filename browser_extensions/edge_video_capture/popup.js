@@ -2,6 +2,7 @@
 
 (() => {
   const startButton = document.querySelector("#start-button");
+  const startReloadButton = document.querySelector("#start-reload-button");
   const stopButton = document.querySelector("#stop-button");
   const sendButton = document.querySelector("#send-button");
   const copyButton = document.querySelector("#copy-button");
@@ -9,6 +10,7 @@
   const candidateList = document.querySelector("#candidate-list");
   let activeTab = null;
   let selectedCandidateId = "";
+  let startPending = false;
 
   function showStatus(code, fallbackCode) {
     status.textContent = EdgeCapturePopupModel.userMessage(code, fallbackCode);
@@ -87,21 +89,57 @@
     return response.message;
   }
 
-  startButton.addEventListener("click", async () => {
-    activeTab = await currentTab();
-    if (!activeTab || !Number.isInteger(activeTab.id)) {
+  function setStartDisabled(disabled) {
+    startButton.disabled = disabled;
+    startReloadButton.disabled = disabled;
+  }
+
+  async function beginCapture({reload = false} = {}) {
+    if (startPending) {
       return;
     }
-    await chrome.runtime.sendMessage({
-      type: "capture:start",
-      tabId: activeTab.id,
-      pageUrl: typeof activeTab.url === "string" ? activeTab.url : "",
-      pageTitle: typeof activeTab.title === "string" ? activeTab.title : "",
-    });
-    selectedCandidateId = "";
-    showStatus("capturing");
-    await refreshCandidates();
-  });
+    startPending = true;
+    setStartDisabled(true);
+    try {
+      activeTab = await currentTab();
+      if (!activeTab || !Number.isInteger(activeTab.id)) {
+        showStatus("capture_start_failed");
+        return;
+      }
+      const response = await chrome.runtime.sendMessage({
+        type: "capture:start",
+        tabId: activeTab.id,
+        pageUrl: typeof activeTab.url === "string" ? activeTab.url : "",
+        pageTitle: typeof activeTab.title === "string" ? activeTab.title : "",
+      });
+      if (!response || !response.ok) {
+        showStatus("capture_start_failed");
+        return;
+      }
+      selectedCandidateId = "";
+      renderCandidates([]);
+      if (!reload) {
+        showStatus("capturing");
+        return;
+      }
+      try {
+        await chrome.tabs.reload(activeTab.id, {bypassCache: true});
+        showStatus("capturing_reloaded");
+      } catch (_error) {
+        showStatus("reload_failed");
+      }
+    } catch (_error) {
+      showStatus("capture_start_failed");
+    } finally {
+      startPending = false;
+      setStartDisabled(false);
+    }
+  }
+
+  startButton.addEventListener("click", () => beginCapture());
+  startReloadButton.addEventListener("click", () =>
+    beginCapture({reload: true}),
+  );
 
   stopButton.addEventListener("click", async () => {
     let response = null;

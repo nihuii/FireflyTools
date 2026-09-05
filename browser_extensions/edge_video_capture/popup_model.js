@@ -9,6 +9,9 @@ const EdgeCapturePopupModel = (() => {
   const MESSAGES = Object.freeze({
     permission_denied: "未授权网页和 CDN 访问权限，捕获未开始。",
     capturing: "正在捕获当前标签页…",
+    capturing_reloaded: "已开始捕获并重新加载页面。",
+    capture_start_failed: "捕获未能开始，请重试。",
+    reload_failed: "捕获已开始，但页面重新加载失败；请手动刷新或点击播放。",
     stopped: "捕获已停止。",
     stop_failed: "未找到正在捕获的会话。",
     copied: "已复制所选候选项。",

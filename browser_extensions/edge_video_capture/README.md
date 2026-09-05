@@ -4,7 +4,7 @@
 
 ## 安全、隐私与功能边界
 
-- 加载或安装扩展时，Edge 会请求 `http://*/*` 与 `https://*/*`，即全部 HTTP(S) 网页和 CDN 的必要 host 权限，以便后台 `webRequest` 监听器可靠注册。权限范围是全 HTTP(S) 源；捕获控制器只保留用户点击“开始捕获”后唯一选中标签页的请求。用户可随时点击 Stop，也可在扩展管理中撤销 host 权限；撤销后捕获不可用。
+- 加载或安装扩展时，Edge 会请求 `http://*/*` 与 `https://*/*`，即全部 HTTP(S) 网页和 CDN 的必要 host 权限，以便后台 `webRequest` 监听器可靠注册。权限范围是全 HTTP(S) 源；捕获控制器只保留用户点击“开始捕获”或“开始捕获并重新加载”后唯一选中标签页的请求。用户可随时点击 Stop，也可在扩展管理中撤销 host 权限；撤销后捕获不可用。
 - 在已获准的 HTTP(S) 范围内，webRequest 回调技术上可能接收到请求 Header；控制器只保留所选标签页的数据，代码也只保留 `Referer`、`Origin`、`User-Agent`、`Accept`、`Accept-Language`、`Range` 六个安全白名单 Header。`Cookie`、`Authorization` 会立即丢弃，不保留、不复制，也不转交给 FireflyTools 或剪贴板。扩展不使用 blocking webRequest、不修改页面，也不代替用户或绕过人机验证。
 - 扩展不处理 DRM。检测到受保护内容时，应停止并按不支持处理。
 - 依赖敏感浏览器会话的站点即使能在 Edge 中播放，下载请求仍可能返回 401/403。遇到这种情况，只保留不含敏感值的诊断并失败；不得扩展传输协议，也不得导出 Cookie、Authorization 或其他敏感 Header。
@@ -46,8 +46,8 @@ python -m tools.edge_companion.install uninstall
 4. 核对扩展 ID 必须是 `applbmkghgaoadhmmcdnbmebgideiefg`；不一致时停止使用并检查加载目录与 `manifest.json`。
 5. 启动 FireflyTools，打开“视频下载”功能，点击“等待 Edge 捕获”；状态应变为“等待捕获”。
 6. 在普通 Microsoft Edge 中通过站点允许的人工安全验证，进入真实播放器。
-7. 加载扩展时接受 Edge 显示的 HTTP(S) 网页和 CDN 访问权限；随后点击扩展，为当前标签页“开始捕获”。开始按钮不会再次请求权限，捕获控制器只保留当前选中的单个标签页。
-8. 回到页面点击播放；在扩展候选中选择一个 HLS、MP4 或 DASH，点击“发送到 FireflyTools”。
+7. 加载扩展时接受 Edge 显示的 HTTP(S) 网页和 CDN 访问权限。若播放器可能在页面初始加载时请求主媒体，推荐点击“开始捕获并重新加载”：扩展会先等待捕获会话持久化成功，再绕过缓存重新加载当前标签页。两个开始按钮都不会再次请求权限，捕获控制器只保留当前选中的单个标签页。
+8. 重新加载可能再次触发站点安全验证；捕获会话仍在同一标签页保持有效。完成人工验证后点击播放，并在扩展候选中选择一个 HLS、MP4 或 DASH，点击“发送到 FireflyTools”。若不希望扩展重新加载页面，可保留原来的人工方式：先点“开始捕获”，再回到同一标签页按 `Ctrl+F5`，随后按需完成验证和播放。
 9. FireflyTools 收到候选后会结束本次等待并弹出不含敏感值的确认框；人工确认后候选才成为当前输入。
 10. 选择名称和输出目录，加入现有下载队列。
 
@@ -74,7 +74,7 @@ python -m tools.edge_companion.install uninstall
 - **`APP_NOT_WAITING`：** FireflyTools 已运行但没有处于“等待捕获”；在视频下载页点击“等待 Edge 捕获”后重新发送。
 - **扩展 ID 不匹配：** Native host manifest 的 `allowed_origins` 和 host 自身都只接受 `chrome-extension://applbmkghgaoadhmmcdnbmebgideiefg/`。若 `edge://extensions` 显示其他 ID，停止使用，确认加载的是本仓库目录且 `manifest.json` 的固定 `key` 未被改动；错误 ID 不能连接本机 host。
 - **企业 Native Messaging 策略限制：** 受组织管理的 Edge 可能通过 `NativeMessagingAllowlist` 等策略只允许指定 host。若策略未允许 `com.fireflytools.video_capture`，应用和扩展不能自行绕过；联系管理员放行，或使用复制/粘贴回退。
-- **没有候选：** 扩展只观察“开始捕获”之后当前标签页新发生的请求，不重放之前已经完成的网络请求，也不自动刷新网页或点击播放器。保持捕获开启，回到同一标签页重新点击播放，再查看候选列表。
+- **没有候选：** 扩展只观察开始捕获之后当前标签页新发生的请求，不重放之前已经完成的网络请求。若媒体可能在页面初始加载时请求，优先点击“开始捕获并重新加载”；它只在捕获启动成功后重新加载当前标签页，不会自动点击播放器或处理安全验证。重新加载可能再次触发站点验证，但捕获会话仍保持有效；完成人工验证后再播放。也可先点原来的“开始捕获”，再到同一标签页按 `Ctrl+F5` 手动强制刷新。
 - **候选过期：** 捕获会话和候选有效期为 5 分钟；扩展清理后或 FireflyTools 在确认、入队、执行时判定过期，都应重新捕获，不要无条件重试旧候选。
 - **下载返回 401/403：** V1 只携带 `Referer`、`Origin`、`User-Agent`、`Accept`、`Accept-Language`、`Range` 安全 Header，不携带网页 Cookie 或 Authorization。依赖敏感浏览器会话的媒体因此可能只能在 Edge 中播放而无法下载；只记录脱敏诊断并停止，不导出敏感会话头、不扩展协议重试。
 - **`TIMEOUT` 或协议版本不一致：** 保留候选并改用复制/粘贴；同时确认扩展、editable 包和 FireflyTools 来自同一版本。
@@ -100,6 +100,7 @@ python -m tools.edge_companion.install uninstall
 | Play 后 10 秒内出现真实 candidate | 待人工执行 | —（需真实 Edge 与目标站） |
 | other tabs do not add candidates | 待人工执行 | —（需真实 Edge） |
 | Stop immediately clears selected tab candidates | 待人工执行 | —（需真实 Edge） |
+| capture-and-reload observes initialization-time media requests | 待人工执行 | —（需真实 Edge 与目标站） |
 | clipboard JSON contains no Cookie/Authorization field/value | 待人工执行 | —（需真实 Edge） |
 | FireflyTools confirmation does not display raw token query | 待人工执行 | —（需真实 Edge 与目标站） |
 | confirmed HLS/MP4/DASH enters normal queue without Playwright | 待人工执行 | —（需真实 Edge 与目标站） |
@@ -109,7 +110,7 @@ python -m tools.edge_companion.install uninstall
 验证日期：2026-09-02。
 
 - 固定 ID：从 `manifest.json` 的公钥独立推导出 `applbmkghgaoadhmmcdnbmebgideiefg`，与预期一致；Python manifest contract 测试也通过。
-- 扩展测试：2026-09-05 使用 Codex 内置 Node 的绝对路径运行六个 JS 测试文件，`tests 50`、`pass 50`、`fail 0`、`skipped 0`。
+- 扩展测试：2026-09-05 使用 Codex 内置 Node 的绝对路径运行六个 JS 测试文件，覆盖捕获确认后重新加载、失败保留会话和并发点击防护，`tests 58`、`pass 58`、`fail 0`、`skipped 0`。
 - Python 完整套件：在 worktree 内设置 `TEMP`/`TMP`，并设置 `QT_QPA_PLATFORM=offscreen`、`PYTHONDONTWRITEBYTECODE=1` 后运行 `python -m unittest discover -s tests -v`。可信的沙箱外复跑结果为 `Ran 291 tests in 31.772s`，`FAILED (failures=1, skipped=1)`，因此完整套件不能记为通过。
   - 唯一失败是与 Edge 捕获无关的图片相似度性能阈值抖动：`test_same_phash_collision_uses_dhash_index_for_ten_thousand_items` 用时 `10.810s`，超过 `10.0s` 门槛。
   - 随后只聚焦复跑该性能项，结果为 `Ran 1 test in 3.625s`、`OK`；未修改图片模块，完整套件原始失败仍保留在本记录中。
