@@ -128,34 +128,43 @@ def _runtime_descriptor_lock(path: Path):
 def write_runtime_descriptor(path: Path, descriptor: RuntimeDescriptor) -> None:
     """Atomically replace ``path`` with ``descriptor`` encoded as UTF-8 JSON."""
     runtime_path = Path(path)
-    temporary_path = None
-    file_descriptor = None
     try:
         runtime_path.parent.mkdir(parents=True, exist_ok=True)
         serialized = json.dumps(
             descriptor.to_dict(), ensure_ascii=False, separators=(",", ":")
         )
         with _runtime_descriptor_lock(runtime_path):
-            file_descriptor, temporary_name = tempfile.mkstemp(
-                prefix=runtime_path.name + ".",
-                suffix=".tmp",
-                dir=runtime_path.parent,
-            )
-            temporary_path = Path(temporary_name)
-            raw_handle = os.fdopen(
-                file_descriptor,
-                "w",
-                encoding="utf-8",
-                newline="\n",
-            )
-            file_descriptor = None
-            with raw_handle as handle:
-                handle.write(serialized)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary_path, runtime_path)
+            _replace_runtime_descriptor_locked(runtime_path, serialized)
     except OSError as exc:
         raise RuntimeError("无法写入运行时描述文件") from exc
+
+
+def _replace_runtime_descriptor_locked(
+    runtime_path: Path,
+    serialized: str,
+) -> None:
+    """Atomically replace a descriptor while its OS lock is already held."""
+    temporary_path = None
+    file_descriptor = None
+    try:
+        file_descriptor, temporary_name = tempfile.mkstemp(
+            prefix=runtime_path.name + ".",
+            suffix=".tmp",
+            dir=runtime_path.parent,
+        )
+        temporary_path = Path(temporary_name)
+        raw_handle = os.fdopen(
+            file_descriptor,
+            "w",
+            encoding="utf-8",
+            newline="\n",
+        )
+        file_descriptor = None
+        with raw_handle as handle:
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, runtime_path)
     finally:
         if file_descriptor is not None:
             try:
@@ -167,6 +176,41 @@ def write_runtime_descriptor(path: Path, descriptor: RuntimeDescriptor) -> None:
                 temporary_path.unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+def replace_runtime_descriptor_if_token(
+    path: Path,
+    expected_token: str,
+    descriptor: RuntimeDescriptor,
+) -> bool:
+    """Atomically replace a descriptor only while its token still matches."""
+    runtime_path = Path(path)
+    if not runtime_path.parent.is_dir() or not isinstance(expected_token, str):
+        return False
+    if not hmac.compare_digest(descriptor.token, expected_token):
+        return False
+    serialized = json.dumps(
+        descriptor.to_dict(), ensure_ascii=False, separators=(",", ":")
+    )
+    with _runtime_descriptor_lock(runtime_path):
+        try:
+            raw_descriptor = json.loads(runtime_path.read_text(encoding="utf-8"))
+            current_token = raw_descriptor.get("token")
+        except (AttributeError, json.JSONDecodeError, OSError, UnicodeError):
+            return False
+        if not isinstance(current_token, str):
+            return False
+        try:
+            matches = hmac.compare_digest(current_token, expected_token)
+        except TypeError:
+            return False
+        if not matches:
+            return False
+        try:
+            _replace_runtime_descriptor_locked(runtime_path, serialized)
+        except OSError as exc:
+            raise RuntimeError("无法写入运行时描述文件") from exc
+        return True
 
 
 def remove_runtime_descriptor_if_token(path: Path, token: str) -> bool:

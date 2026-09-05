@@ -380,7 +380,7 @@ class EdgeCaptureReceiverTests(unittest.TestCase):
         )
 
     def test_running_receiver_renews_runtime_descriptor_after_old_ttl(self):
-        receiver = self.make_receiver(renewal_interval_seconds=1.0)
+        receiver = self.make_receiver()
         receiver.start()
         server = receiver._server
         original = read_runtime_descriptor(
@@ -389,7 +389,7 @@ class EdgeCaptureReceiverTests(unittest.TestCase):
             pid_checker=lambda pid: pid == os.getpid(),
         )
 
-        self.clock.advance(1.0)
+        self.clock.advance(RUNTIME_TTL_SECONDS / 2)
         self.now += timedelta(seconds=RUNTIME_TTL_SECONDS + 1)
         server.service_actions()
 
@@ -408,19 +408,45 @@ class EdgeCaptureReceiverTests(unittest.TestCase):
         )
 
     def test_stopped_receiver_does_not_recreate_descriptor_on_service_action(self):
-        receiver = self.make_receiver(renewal_interval_seconds=1.0)
+        receiver = self.make_receiver()
         receiver.start()
         server = receiver._server
 
-        self.clock.advance(1.0)
+        self.clock.advance(RUNTIME_TTL_SECONDS / 2)
         self.now += timedelta(seconds=1)
         server.service_actions()
         receiver.stop()
-        self.clock.advance(1.0)
+        self.clock.advance(RUNTIME_TTL_SECONDS / 2)
         self.now += timedelta(seconds=1)
         server.service_actions()
 
         self.assertFalse(self.runtime_path.exists())
+
+    def test_old_receiver_renewal_does_not_overwrite_replacement_descriptor(self):
+        receiver = self.make_receiver()
+        receiver.start()
+        server = receiver._server
+        replacement = RuntimeDescriptor(
+            port=45678,
+            token="replacement-token",
+            pid=os.getpid(),
+            protocol_version=1,
+            expires_at=self.now + timedelta(seconds=RUNTIME_TTL_SECONDS),
+        )
+        write_runtime_descriptor(self.runtime_path, replacement)
+
+        self.clock.advance(RUNTIME_TTL_SECONDS / 2)
+        self.now += timedelta(seconds=1)
+        server.service_actions()
+
+        self.assertEqual(
+            read_runtime_descriptor(
+                self.runtime_path,
+                now=lambda: self.now,
+                pid_checker=lambda pid: pid == os.getpid(),
+            ),
+            replacement,
+        )
 
     def test_missing_and_wrong_authorization_are_rejected(self):
         receiver = self.make_receiver()

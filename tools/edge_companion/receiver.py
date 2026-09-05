@@ -26,6 +26,7 @@ from tools.edge_companion.runtime import (
     RuntimeDescriptor,
     default_runtime_path,
     remove_runtime_descriptor_if_token,
+    replace_runtime_descriptor_if_token,
     write_runtime_descriptor,
 )
 
@@ -49,7 +50,6 @@ class EdgeCaptureReceiver(QObject):
         token_factory: Callable[[], str] | None = None,
         clock: Callable[[], float] = time.monotonic,
         now: Callable[[], datetime] | None = None,
-        renewal_interval_seconds: float = RUNTIME_TTL_SECONDS / 2,
         parent: QObject | None = None,
     ) -> None:
         """Create a stopped receiver with injectable time and token sources."""
@@ -60,7 +60,6 @@ class EdgeCaptureReceiver(QObject):
         self._token_factory = token_factory or (lambda: secrets.token_urlsafe(32))
         self._clock = clock
         self._now = now or (lambda: datetime.now(timezone.utc))
-        self._renewal_interval_seconds = renewal_interval_seconds
         self._lifecycle_lock = threading.RLock()
         self._state_lock = threading.RLock()
         self._active_condition = threading.Condition()
@@ -306,13 +305,14 @@ class EdgeCaptureReceiver(QObject):
         with self._active_condition:
             if self._stopping:
                 return
-        if server is not self._server or self._token is None:
+        token = self._token
+        if server is not self._server or token is None:
             return
         current_tick = self._clock()
         if (
             self._last_renewal_tick is not None
             and current_tick - self._last_renewal_tick
-            < self._renewal_interval_seconds
+            < RUNTIME_TTL_SECONDS / 2
         ):
             return
         self._last_renewal_tick = current_tick
@@ -326,13 +326,17 @@ class EdgeCaptureReceiver(QObject):
                 raise ValueError("receiver clock must include a timezone")
             descriptor = RuntimeDescriptor(
                 port=int(server.server_address[1]),
-                token=self._token,
+                token=token,
                 pid=os.getpid(),
                 protocol_version=PROTOCOL_VERSION,
                 expires_at=current.astimezone(timezone.utc)
                 + timedelta(seconds=RUNTIME_TTL_SECONDS),
             )
-            write_runtime_descriptor(self._runtime_path, descriptor)
+            replace_runtime_descriptor_if_token(
+                self._runtime_path,
+                token,
+                descriptor,
+            )
         except Exception:
             self.status_changed.emit("错误", "无法续租 Edge 捕获连接，请重启应用。")
 
