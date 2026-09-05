@@ -115,7 +115,10 @@ const EdgeCaptureNativeClient = (() => {
       if (
         !ack ||
         ack.type !== "ack" ||
-        typeof ack.request_id !== "string"
+        typeof ack.request_id !== "string" ||
+        typeof ack.ok !== "boolean" ||
+        typeof ack.code !== "string" ||
+        ack.code.length === 0
       ) {
         return;
       }

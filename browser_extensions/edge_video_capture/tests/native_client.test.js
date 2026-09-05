@@ -84,6 +84,65 @@ test("connects to the fixed host and resolves only the matching ack", async () =
   assert.equal(client.pending.size, 0);
 });
 
+test("ignores malformed matching acks until one valid ack settles the request", async () => {
+  const {runtime, port} = fakeRuntime();
+  const scheduled = [];
+  const cleared = [];
+  const client = nativeClient.createNativeClient({
+    runtime,
+    setTimeoutFn(callback, delay) {
+      scheduled.push({callback, delay});
+      return scheduled.length;
+    },
+    clearTimeoutFn(timer) {
+      cleared.push(timer);
+    },
+  });
+  let settlementCount = 0;
+  const pending = client.send(validMessage("validated-ack")).then((ack) => {
+    settlementCount += 1;
+    return ack;
+  });
+
+  for (const malformed of [
+    {type: "ack", request_id: "validated-ack", code: "ACCEPTED"},
+    {type: "ack", request_id: "validated-ack", ok: "yes", code: "ACCEPTED"},
+    {type: "ack", request_id: "validated-ack", ok: true, code: ""},
+  ]) {
+    port.onMessage.emit(malformed);
+  }
+  await Promise.resolve();
+
+  assert.equal(settlementCount, 0);
+  assert.equal(client.pending.size, 1);
+  assert.deepEqual(cleared, []);
+  assert.equal(scheduled.length, 1);
+
+  port.onMessage.emit({
+    type: "ack",
+    request_id: "validated-ack",
+    ok: false,
+    code: "RECEIVER_ERROR",
+  });
+  assert.deepEqual(await pending, {
+    type: "ack",
+    request_id: "validated-ack",
+    ok: false,
+    code: "RECEIVER_ERROR",
+  });
+  port.onMessage.emit({
+    type: "ack",
+    request_id: "validated-ack",
+    ok: true,
+    code: "ACCEPTED",
+  });
+  await Promise.resolve();
+
+  assert.equal(settlementCount, 1);
+  assert.equal(client.pending.size, 0);
+  assert.deepEqual(cleared, [1]);
+});
+
 test("uses a 10-second timeout and removes the timed-out request", async () => {
   const {runtime} = fakeRuntime();
   const scheduled = [];

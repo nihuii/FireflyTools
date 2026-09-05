@@ -10,8 +10,8 @@
   let activeTab = null;
   let selectedCandidateId = "";
 
-  function showStatus(code) {
-    status.textContent = EdgeCapturePopupModel.userMessage(code);
+  function showStatus(code, fallbackCode) {
+    status.textContent = EdgeCapturePopupModel.userMessage(code, fallbackCode);
   }
 
   async function currentTab() {
@@ -145,7 +145,7 @@
       if (response && response.ok) {
         showStatus("sent");
       } else {
-        showStatus((response && response.code) || "send_failed");
+        showStatus(response && response.code, "send_failed");
       }
     } catch (_error) {
       showStatus("send_failed");

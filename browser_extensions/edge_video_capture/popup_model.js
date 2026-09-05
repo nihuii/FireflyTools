@@ -52,8 +52,8 @@ const EdgeCapturePopupModel = (() => {
     };
   }
 
-  function userMessage(code) {
-    return MESSAGES[code] || "";
+  function userMessage(code, fallbackCode) {
+    return MESSAGES[code] || MESSAGES[fallbackCode] || "";
   }
 
   return {candidateRow, userMessage};

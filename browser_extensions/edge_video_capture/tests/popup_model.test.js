@@ -69,3 +69,17 @@ test("userMessage maps native host failures while preserving copy fallback guida
     "连接组件响应超时；候选仍可复制。",
   );
 });
+
+test("unmapped native host failures use the generic send fallback", () => {
+  for (const code of [
+    "RECEIVER_ERROR",
+    "UNAUTHORIZED",
+    "FORBIDDEN",
+    "unknown",
+  ]) {
+    assert.equal(
+      popupModel.userMessage(code, "send_failed"),
+      "发送失败；候选仍可复制。",
+    );
+  }
+});
