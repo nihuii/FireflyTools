@@ -101,16 +101,17 @@
     startPending = true;
     setStartDisabled(true);
     try {
-      activeTab = await currentTab();
-      if (!activeTab || !Number.isInteger(activeTab.id)) {
+      const captureTab = await currentTab();
+      activeTab = captureTab;
+      if (!captureTab || !Number.isInteger(captureTab.id)) {
         showStatus("capture_start_failed");
         return;
       }
       const response = await chrome.runtime.sendMessage({
         type: "capture:start",
-        tabId: activeTab.id,
-        pageUrl: typeof activeTab.url === "string" ? activeTab.url : "",
-        pageTitle: typeof activeTab.title === "string" ? activeTab.title : "",
+        tabId: captureTab.id,
+        pageUrl: typeof captureTab.url === "string" ? captureTab.url : "",
+        pageTitle: typeof captureTab.title === "string" ? captureTab.title : "",
       });
       if (!response || !response.ok) {
         showStatus("capture_start_failed");
@@ -123,7 +124,7 @@
         return;
       }
       try {
-        await chrome.tabs.reload(activeTab.id, {bypassCache: true});
+        await chrome.tabs.reload(captureTab.id, {bypassCache: true});
         showStatus("capturing_reloaded");
       } catch (_error) {
         showStatus("reload_failed");

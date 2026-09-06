@@ -64,11 +64,13 @@ function loadPopup({
   const messages = [];
   const reloads = [];
   let permissionRequests = 0;
+  let intervalCallback = null;
   const currentTab = {
     id: 37,
     url: "https://video.example/watch/1",
     title: "Selected video",
   };
+  let queriedTab = currentTab;
   const chrome = {
     permissions: {
       request: async () => {
@@ -77,7 +79,7 @@ function loadPopup({
       },
     },
     tabs: {
-      query: async () => [currentTab],
+      query: async () => (queriedTab ? [queriedTab] : []),
       reload: async (tabId, options) => {
         reloads.push({tabId, options: {...options}});
         return reload(tabId, options);
@@ -116,7 +118,10 @@ function loadPopup({
       userMessage: (code) => code || "",
     },
     navigator: {clipboard: {writeText: async () => {}}},
-    setInterval: () => 1,
+    setInterval: (callback) => {
+      intervalCallback = callback;
+      return 1;
+    },
   });
 
   return {
@@ -127,6 +132,13 @@ function loadPopup({
     },
     messages,
     reloads,
+    setCurrentTab(tab) {
+      queriedTab = tab;
+    },
+    triggerRefresh() {
+      assert.equal(typeof intervalCallback, "function");
+      intervalCallback();
+    },
   };
 }
 
@@ -177,6 +189,47 @@ test("capture and reload waits for persisted capture before bypassing cache", as
   );
   assert.equal(harness.elements.get("#start-button").disabled, false);
   assert.equal(harness.elements.get("#start-reload-button").disabled, false);
+});
+
+test("capture and reload keeps the tab selected when capture started", async () => {
+  const startGate = deferred();
+  const harness = loadPopup({startResponse: startGate.promise});
+  const captureTab = harness.currentTab;
+  const otherTab = {
+    id: 91,
+    url: "https://video.example/watch/2",
+    title: "Another video",
+  };
+  await flushTasks();
+  harness.messages.length = 0;
+
+  const click = clickListener(harness, "#start-reload-button")();
+  await flushTasks();
+  harness.setCurrentTab(otherTab);
+  harness.triggerRefresh();
+  await flushTasks();
+
+  assert.deepEqual(
+    harness.messages.find((message) => message.type === "capture:start"),
+    {
+      type: "capture:start",
+      tabId: captureTab.id,
+      pageUrl: captureTab.url,
+      pageTitle: captureTab.title,
+    },
+  );
+  assert.equal(harness.reloads.length, 0);
+
+  startGate.resolve({ok: true});
+  await click;
+
+  assert.deepEqual(harness.reloads, [
+    {tabId: captureTab.id, options: {bypassCache: true}},
+  ]);
+  assert.equal(
+    harness.reloads.some((call) => call.tabId === otherTab.id),
+    false,
+  );
 });
 
 test("capture start failure never reloads the tab", async (context) => {
