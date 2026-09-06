@@ -89,9 +89,10 @@
     return response.message;
   }
 
-  function setStartDisabled(disabled) {
+  function setCaptureControlsDisabled(disabled) {
     startButton.disabled = disabled;
     startReloadButton.disabled = disabled;
+    stopButton.disabled = disabled;
   }
 
   async function beginCapture({reload = false} = {}) {
@@ -99,7 +100,7 @@
       return;
     }
     startPending = true;
-    setStartDisabled(true);
+    setCaptureControlsDisabled(true);
     try {
       const captureTab = await currentTab();
       activeTab = captureTab;
@@ -133,7 +134,7 @@
       showStatus("capture_start_failed");
     } finally {
       startPending = false;
-      setStartDisabled(false);
+      setCaptureControlsDisabled(false);
     }
   }
 

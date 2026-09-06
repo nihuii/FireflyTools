@@ -191,6 +191,26 @@ test("capture and reload waits for persisted capture before bypassing cache", as
   assert.equal(harness.elements.get("#start-reload-button").disabled, false);
 });
 
+test("stop is disabled for the full pending capture and reload operation", async () => {
+  const startGate = deferred();
+  const harness = loadPopup({startResponse: startGate.promise});
+  await flushTasks();
+
+  const click = clickListener(harness, "#start-reload-button")();
+  await flushTasks();
+
+  assert.equal(harness.elements.get("#start-button").disabled, true);
+  assert.equal(harness.elements.get("#start-reload-button").disabled, true);
+  assert.equal(harness.elements.get("#stop-button").disabled, true);
+
+  startGate.resolve({ok: true});
+  await click;
+
+  assert.equal(harness.elements.get("#start-button").disabled, false);
+  assert.equal(harness.elements.get("#start-reload-button").disabled, false);
+  assert.equal(harness.elements.get("#stop-button").disabled, false);
+});
+
 test("capture and reload keeps the tab selected when capture started", async () => {
   const startGate = deferred();
   const harness = loadPopup({startResponse: startGate.promise});

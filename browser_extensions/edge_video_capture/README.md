@@ -110,7 +110,7 @@ python -m tools.edge_companion.install uninstall
 验证日期：2026-09-02。
 
 - 固定 ID：从 `manifest.json` 的公钥独立推导出 `applbmkghgaoadhmmcdnbmebgideiefg`，与预期一致；Python manifest contract 测试也通过。
-- 扩展测试：2026-09-05 使用 Codex 内置 Node 的绝对路径运行六个 JS 测试文件，覆盖捕获确认后重新加载、失败保留会话和并发点击防护，`tests 58`、`pass 58`、`fail 0`、`skipped 0`。
+- 扩展测试：2026-09-05 使用 Codex 内置 Node 的绝对路径运行六个 JS 测试文件，覆盖捕获确认后重新加载、失败保留会话和并发点击防护，`tests 60`、`pass 60`、`fail 0`、`skipped 0`。
 - Python 完整套件：在 worktree 内设置 `TEMP`/`TMP`，并设置 `QT_QPA_PLATFORM=offscreen`、`PYTHONDONTWRITEBYTECODE=1` 后运行 `python -m unittest discover -s tests -v`。可信的沙箱外复跑结果为 `Ran 291 tests in 31.772s`，`FAILED (failures=1, skipped=1)`，因此完整套件不能记为通过。
   - 唯一失败是与 Edge 捕获无关的图片相似度性能阈值抖动：`test_same_phash_collision_uses_dhash_index_for_ten_thousand_items` 用时 `10.810s`，超过 `10.0s` 门槛。
   - 随后只聚焦复跑该性能项，结果为 `Ran 1 test in 3.625s`、`OK`；未修改图片模块，完整套件原始失败仍保留在本记录中。
